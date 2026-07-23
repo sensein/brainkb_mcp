@@ -19,6 +19,8 @@ services:
       MCP_PORT: "8080"
       # On macOS/Windows Docker Desktop, host.docker.internal = the host machine.
       BRAINKB_URL: http://host.docker.internal:8010
+      # usermanagement service (admin user/role tools). Separate service + token.
+      USERMANAGEMENT_URL: http://host.docker.internal:8004
     # Optional local-only credentials for auto-login (file may be absent).
     env_file:
       - path: .env

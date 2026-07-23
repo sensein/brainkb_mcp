@@ -212,6 +212,65 @@ def _delete(path: str) -> Any:
 
 
 # --------------------------------------------------------------------------- #
+# usermanagement service client (admin: users, roles, activation)
+# --------------------------------------------------------------------------- #
+# The usermanagement service (:8004) is a SEPARATE service with its OWN token
+# (per-service auth). We log into it with the same credentials and cache a UM
+# token in-process. Admin endpoints there require an Admin/SuperAdmin role.
+_UM_URL = (os.getenv("USERMANAGEMENT_URL") or _DEFAULT_URL.replace(":8010", ":8004")).rstrip("/")
+_UM_TOKENS: Dict[str, str] = {}
+
+
+def _creds():
+    """(email, password) for usermanagement login — from the session's brainkb_login
+    password (if provided) or env BRAINKB_EMAIL/BRAINKB_PASSWORD."""
+    key = _session_key()
+    if key is not None and key in _SESSIONS and _SESSIONS[key].get("password"):
+        sd = _SESSIONS[key]
+        return sd.get("email") or os.getenv("BRAINKB_EMAIL"), sd["password"]
+    return os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
+
+
+def _um_login() -> str:
+    email, pw = _creds()
+    if not (email and pw):
+        raise _NotAuthed("usermanagement admin needs credentials — call brainkb_login(email, "
+                         "password) or set BRAINKB_EMAIL/BRAINKB_PASSWORD (OAuth-only tokens "
+                         "can't be used to log into usermanagement).")
+    r = httpx.post(f"{_UM_URL}/api/token", json={"email": email, "password": pw}, timeout=30)
+    r.raise_for_status()
+    tok = r.json()["access_token"]
+    _UM_TOKENS[email] = tok
+    return tok
+
+
+def _um(method: str, path: str, json: Any = None, params: Any = None, _retry: bool = True) -> Any:
+    try:
+        email, _ = _creds()
+        tok = _UM_TOKENS.get(email) or _um_login()
+        with httpx.Client(timeout=_TIMEOUT) as c:
+            resp = c.request(method, f"{_UM_URL}{path}",
+                             headers={"Authorization": f"Bearer {tok}"}, json=json, params=params)
+        if resp.status_code == 401 and _retry:
+            _UM_TOKENS.pop(email, None)
+            return _um(method, path, json=json, params=params, _retry=False)
+        return _result(resp)
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+
+
+def _um_profile_id(email: str) -> Optional[int]:
+    users = _um("GET", "/api/admin/users", params={"q": email, "limit": 200})
+    if isinstance(users, list):
+        for u in users:
+            if (u.get("email") or "").lower() == email.lower():
+                return u.get("profile_id")
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # auth / session
 # --------------------------------------------------------------------------- #
 
@@ -232,7 +291,9 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
         if key is None:
             return ("Logged in, but this session could not be identified to cache the "
                     "token; send an Authorization header instead.")
-        _SESSIONS[key] = {"token": token, "url": base, "email": email}
+        # Password kept in memory for this session only, so admin actions on the
+        # separate usermanagement service can log in with the same credentials.
+        _SESSIONS[key] = {"token": token, "url": base, "email": email, "password": password}
         return f"Logged in as {email} at {base} (this session)."
     except httpx.HTTPStatusError as e:
         return f"Login failed (HTTP {e.response.status_code}). Check email/password and base_url."
@@ -488,6 +549,68 @@ def brainkb_remove_access_rule(slug: str, rule_id: int) -> Any:
     """(Space manager) Delete a fine-grained access rule by its id
     (see brainkb_list_access_rules)."""
     return _delete(f"/api/spaces/{quote(slug)}/access-rules/{rule_id}")
+
+
+# --------------------------------------------------------------------------- #
+# admin user management (usermanagement service; requires Admin/SuperAdmin)
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def brainkb_list_users(q: str = "", role: str = "", limit: int = 50) -> Any:
+    """(Admin) List users (profiles) — filter by `q` (name/email/orcid) or `role`.
+    Shows profile_id, email, roles, providers, ban status."""
+    params: Dict[str, Any] = {"limit": limit}
+    if q:
+        params["q"] = q
+    if role:
+        params["role"] = role
+    return _um("GET", "/api/admin/users", params=params)
+
+
+@mcp.tool()
+def brainkb_available_roles() -> Any:
+    """(Admin) List the available roles/groups (Admin, Lab Member, Curator, …)."""
+    return _um("GET", "/api/admin/roles")
+
+
+@mcp.tool()
+def brainkb_create_role(name: str, category: str = "Content", description: str = "") -> Any:
+    """(Admin) Create a new role/group — e.g. an 'External' collaborator group —
+    which can then be assigned with brainkb_assign_role."""
+    return _um("POST", "/api/admin/roles",
+               json={"name": name, "category": category, "description": description})
+
+
+@mcp.tool()
+def brainkb_assign_role(email: str, role: str) -> Any:
+    """(Admin) Assign a role/group to a user by email (e.g. 'Admin', 'Lab Member',
+    'External'). The user must already have a profile (created on first login)."""
+    pid = _um_profile_id(email)
+    if not pid:
+        return {"error": True, "detail": f"no profile found for {email} — the user must sign in "
+                                         "(e.g. via Globus) or be created before roles can be assigned."}
+    return _um("POST", f"/api/admin/users/{pid}/roles", json={"role": role, "is_active": True})
+
+
+@mcp.tool()
+def brainkb_remove_role(email: str, role: str) -> Any:
+    """(Admin) Remove a role/group from a user by email."""
+    pid = _um_profile_id(email)
+    if not pid:
+        return {"error": True, "detail": f"no profile found for {email}"}
+    return _um("DELETE", f"/api/admin/users/{pid}/roles/{quote(role)}")
+
+
+@mcp.tool()
+def brainkb_activate_user(email: str) -> Any:
+    """(Admin) Activate a user's account (sets the JWT user active) by email."""
+    return _um("POST", "/api/admin/users/activate", json={"email": email})
+
+
+@mcp.tool()
+def brainkb_deactivate_user(email: str) -> Any:
+    """(Admin) Deactivate a user's account by email."""
+    return _um("POST", "/api/admin/users/deactivate", json={"email": email})
 
 
 if __name__ == "__main__":
