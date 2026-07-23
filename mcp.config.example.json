@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "brainkb": {
+      "command": "python",
+      "args": ["/Users/tekrajchhetri/Documents/brainypedia_codes_design/brainkb_mcp/server.py"],
+      "env": {
+        "BRAINKB_URL": "http://localhost:8010"
+      }
+    }
+  }
+}

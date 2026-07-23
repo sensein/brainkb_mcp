@@ -1,0 +1,16 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "org.brainkb/brainkb",
+  "description": "MCP server for querying BrainKB, a knowledge base for neuroscience knowledge graphs.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/sensein/BrainKB",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.brainkb.org/mcp"
+    }
+  ]
+}
