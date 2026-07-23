@@ -40,52 +40,106 @@ mcp = FastMCP(
     port=int(os.getenv("MCP_PORT", "8080")),
 )
 
-_STATE: Dict[str, Optional[str]] = {
-    "url": os.getenv("BRAINKB_URL", "http://localhost:8010").rstrip("/"),
-    "email": None,
-    "token": None,
-}
+_DEFAULT_URL = os.getenv("BRAINKB_URL", "http://localhost:8010").rstrip("/")
 _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
+# Per-session login store (fallback for local/stdio use only), keyed by the MCP
+# session's identity. The hosted multi-user remote does NOT rely on this — each
+# call carries the caller's own token via the Authorization header (stateless).
+_SESSIONS: Dict[int, Dict[str, str]] = {}
+
 
 # --------------------------------------------------------------------------- #
-# internals
+# multi-user auth resolution
 # --------------------------------------------------------------------------- #
 
-def _base() -> str:
-    return _STATE["url"] or "http://localhost:8010"
+def _decode_sub(token: str) -> Optional[str]:
+    """Read the 'sub' (email) claim from a JWT without verifying it — used only to
+    fill the user_id parameter. The server verifies the token for real."""
+    import base64
+    import json as _json
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return _json.loads(base64.urlsafe_b64decode(payload)).get("sub")
+    except Exception:
+        return None
 
 
-def _do_login(email: str, password: str, base_url: Optional[str] = None) -> None:
-    if base_url:
-        _STATE["url"] = base_url.rstrip("/")
-    r = httpx.post(f"{_base()}/api/token",
-                   json={"email": email, "password": password}, timeout=30)
-    r.raise_for_status()
-    _STATE["token"] = r.json()["access_token"]
-    _STATE["email"] = email
+def _session_key() -> Optional[int]:
+    try:
+        return id(mcp.get_context().session)
+    except Exception:
+        return None
 
 
-def _ensure_auth() -> None:
-    """Log in if we have no token but env credentials are set."""
-    if _STATE["token"]:
-        return
-    email, pw = os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
-    if email and pw:
-        _do_login(email, pw)
-    if not _STATE["token"]:
-        raise RuntimeError("Not logged in. Call brainkb_login(email, password) first "
-                           "(or set BRAINKB_EMAIL / BRAINKB_PASSWORD).")
+def _request_headers() -> Dict[str, str]:
+    """Headers of the current inbound MCP request (empty for stdio / no request)."""
+    try:
+        req = getattr(mcp.get_context().request_context, "request", None)
+        if req is not None and getattr(req, "headers", None) is not None:
+            return {k.lower(): v for k, v in req.headers.items()}
+    except Exception:
+        pass
+    return {}
 
 
-def _headers() -> Dict[str, str]:
-    _ensure_auth()
-    return {"Authorization": f"Bearer {_STATE['token']}"}
+class _NotAuthed(RuntimeError):
+    pass
+
+
+def _resolve() -> Dict[str, str]:
+    """
+    Resolve the auth context for THIS call — multi-user safe.
+
+    Order of precedence:
+      1. Caller's `Authorization: Bearer <BrainKB JWT>` header (stateless
+         pass-through; how the hosted multi-user remote authenticates each user).
+         `X-BrainKB-Base-URL` header optionally overrides the backend URL.
+      2. Per-session token set by `brainkb_login` (local/stdio convenience).
+      3. Env `BRAINKB_EMAIL`/`BRAINKB_PASSWORD` auto-login (single-user/dev).
+
+    Returns {url, token, email}. Never stores one caller's token where another
+    caller could read it.
+    """
+    hdrs = _request_headers()
+    base = hdrs.get("x-brainkb-base-url", _DEFAULT_URL).rstrip("/")
+
+    # 1) header pass-through
+    authz = hdrs.get("authorization", "")
+    if authz[:7].lower() == "bearer " and authz[7:].strip():
+        token = authz[7:].strip()
+        return {"url": base, "token": token, "email": _decode_sub(token) or ""}
+
+    # 2) per-session login
+    key = _session_key()
+    if key is not None and key in _SESSIONS:
+        sd = _SESSIONS[key]
+        return {"url": sd.get("url", base), "token": sd["token"],
+                "email": sd.get("email") or _decode_sub(sd["token"]) or ""}
+
+    # 3) env auto-login
+    em, pw = os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
+    if em and pw:
+        try:
+            r = httpx.post(f"{base}/api/token", json={"email": em, "password": pw}, timeout=30)
+            r.raise_for_status()
+            token = r.json()["access_token"]
+            if key is not None:
+                _SESSIONS[key] = {"token": token, "url": base, "email": em}
+            return {"url": base, "token": token, "email": em}
+        except Exception:
+            pass
+
+    raise _NotAuthed(
+        "Not authenticated. On the hosted remote, send an 'Authorization: Bearer "
+        "<BrainKB token>' header. Locally, call brainkb_login(email, password) or "
+        "set BRAINKB_EMAIL / BRAINKB_PASSWORD."
+    )
 
 
 def _me() -> str:
-    _ensure_auth()
-    return _STATE["email"] or ""
+    return _resolve()["email"]
 
 
 def _result(resp: httpx.Response) -> Any:
@@ -101,12 +155,15 @@ def _result(resp: httpx.Response) -> Any:
     return {"error": True, "status_code": resp.status_code, "detail": body}
 
 
-def _get(path: str, params: Optional[Dict[str, Any]] = None, auth: bool = True) -> Any:
+def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     try:
+        ctx = _resolve()
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{_base()}{path}", params=params or {},
-                         headers=_headers() if auth else {})
+            resp = c.get(f"{ctx['url']}{path}", params=params or {},
+                         headers={"Authorization": f"Bearer {ctx['token']}"})
         return _result(resp)
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
     except Exception as e:
         return {"error": True, "detail": str(e)}
 
@@ -115,22 +172,29 @@ def _post(path: str, params: Optional[Dict[str, Any]] = None,
           json: Any = None, content: Optional[bytes] = None,
           ctype: Optional[str] = None, files: Any = None) -> Any:
     try:
-        headers = _headers()
+        ctx = _resolve()
+        headers = {"Authorization": f"Bearer {ctx['token']}"}
         if ctype:
             headers["Content-Type"] = ctype
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.post(f"{_base()}{path}", params=params or {}, headers=headers,
+            resp = c.post(f"{ctx['url']}{path}", params=params or {}, headers=headers,
                           json=json, content=content, files=files)
         return _result(resp)
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
     except Exception as e:
         return {"error": True, "detail": str(e)}
 
 
 def _patch(path: str, json: Any = None) -> Any:
     try:
+        ctx = _resolve()
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.patch(f"{_base()}{path}", headers=_headers(), json=json)
+            resp = c.patch(f"{ctx['url']}{path}",
+                           headers={"Authorization": f"Bearer {ctx['token']}"}, json=json)
         return _result(resp)
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
     except Exception as e:
         return {"error": True, "detail": str(e)}
 
@@ -141,11 +205,23 @@ def _patch(path: str, json: Any = None) -> Any:
 
 @mcp.tool()
 def brainkb_login(email: str, password: str, base_url: str = "") -> str:
-    """Authenticate to BrainKB with the user's credentials and cache the JWT in
-    memory for subsequent calls. The password/token are never echoed back."""
+    """Authenticate to BrainKB with the user's credentials and cache the JWT for
+    THIS session only (isolated per caller). The password/token are never echoed.
+
+    On the hosted multi-user remote you can skip this and instead have your client
+    send an 'Authorization: Bearer <BrainKB token>' header — that is the preferred,
+    stateless way to authenticate per user."""
+    key = _session_key()
+    base = (base_url or _DEFAULT_URL).rstrip("/")
     try:
-        _do_login(email, password, base_url or None)
-        return f"Logged in as {email} at {_base()}."
+        r = httpx.post(f"{base}/api/token", json={"email": email, "password": password}, timeout=30)
+        r.raise_for_status()
+        token = r.json()["access_token"]
+        if key is None:
+            return ("Logged in, but this session could not be identified to cache the "
+                    "token; send an Authorization header instead.")
+        _SESSIONS[key] = {"token": token, "url": base, "email": email}
+        return f"Logged in as {email} at {base} (this session)."
     except httpx.HTTPStatusError as e:
         return f"Login failed (HTTP {e.response.status_code}). Check email/password and base_url."
     except Exception as e:
@@ -153,18 +229,22 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
 
 
 @mcp.tool()
-def brainkb_whoami() -> Dict[str, Any]:
-    """Report the current session: base URL, logged-in email, and auth state."""
-    return {"base_url": _base(), "email": _STATE["email"], "authenticated": bool(_STATE["token"])}
+def brainkb_logout() -> str:
+    """Forget the cached token for this session."""
+    key = _session_key()
+    if key is not None:
+        _SESSIONS.pop(key, None)
+    return "Logged out (this session)."
 
 
 @mcp.tool()
-def brainkb_set_base_url(base_url: str) -> str:
-    """Point the client at a different BrainKB deployment (clears the session)."""
-    _STATE["url"] = base_url.rstrip("/")
-    _STATE["token"] = None
-    _STATE["email"] = None
-    return f"Base URL set to {_base()}. Please log in again."
+def brainkb_whoami() -> Dict[str, Any]:
+    """Report the current caller's auth state (base URL, email, authenticated)."""
+    try:
+        ctx = _resolve()
+        return {"base_url": ctx["url"], "email": ctx["email"], "authenticated": True}
+    except _NotAuthed:
+        return {"base_url": _DEFAULT_URL, "email": None, "authenticated": False}
 
 
 # --------------------------------------------------------------------------- #

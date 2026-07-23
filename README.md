@@ -70,10 +70,23 @@ MCP_TRANSPORT=streamable-http MCP_HOST=0.0.0.0 MCP_PORT=8080 python server.py
 # front with TLS at https://mcp.brainkb.org/mcp
 ```
 
-> Note: the in-memory single-token session model is for **local single-user
-> (stdio)** use. Before exposing the multi-user hosted remote, auth must become
-> per-session/per-request (each caller supplies their own token) — otherwise one
-> user's login would be shared across callers.
+## Authentication (multi-user safe)
+
+Auth is resolved **per call**, so the hosted remote can serve many users without
+one caller's credentials leaking to another. Resolution order:
+
+1. **`Authorization: Bearer <BrainKB JWT>` header** on the inbound request — the
+   preferred, **stateless** way for the multi-user remote. Each user's client
+   attaches their own token; the server just forwards it to the backend. An
+   optional `X-BrainKB-Base-URL` header overrides the backend URL.
+2. **Per-session login** — `brainkb_login(email, password)` caches a token scoped
+   to *that MCP session only* (convenient for local/stdio use).
+3. **Env auto-login** — `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` (single-user/dev).
+
+There is **no shared/global token**. The `user_id` sent to the backend is derived
+from the caller's own token (`sub` claim), and the backend independently verifies
+the token and enforces space access — so a wrong/forged token is rejected, never
+served from another user's context.
 
 ## Register with Claude Code
 
