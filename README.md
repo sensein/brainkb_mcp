@@ -138,17 +138,66 @@ Notes for the ALB:
 
 ## Register with Claude Code
 
-Either add it via the CLI:
+There are two ways to register: **stdio** (Claude Code launches the Python
+process) or **HTTP** (Claude Code connects to the running Docker container). Use
+whichever you prefer — both expose the same `brainkb_*` tools.
+
+> Tools load at **session start** — after registering, open a **fresh** Claude
+> Code session for the `brainkb_*` tools to appear. Use `--scope user` so the
+> server is available from any directory (not just this project).
+
+### A. Docker (HTTP / streamable-http) — recommended for testing the hosted setup
+
+1. Run the container (publishes port 8080 and points at the query_service on the
+   host — `host.docker.internal` resolves to your machine on Docker Desktop):
+
+   ```bash
+   cd brainkb_mcp
+   BRAINKB_URL=http://host.docker.internal:8010 docker compose up -d
+   # verify it's serving: 406 on a bare GET is expected (means "up")
+   curl -o /dev/null -w "%{http_code}\n" http://localhost:8080/mcp
+   ```
+
+   Two gotchas this avoids: the port **must be published** (`docker ps` should show
+   `0.0.0.0:8080->8080`, not just `8080/tcp`), and **`BRAINKB_URL` must be
+   `host.docker.internal:8010`, not `localhost`** — inside the container
+   `localhost` is the container, not your stack.
+
+2. Register the HTTP endpoint (note the `/mcp` path):
+
+   ```bash
+   claude mcp add --scope user --transport http brainkb http://localhost:8080/mcp
+   claude mcp list | grep brainkb        # -> brainkb: http://localhost:8080/mcp (HTTP) - ✔ Connected
+   ```
+
+3. Auth: either call `brainkb_login(email, password)` in-session, or bake
+   auto-login into the container:
+
+   ```bash
+   BRAINKB_URL=http://host.docker.internal:8010 \
+   BRAINKB_EMAIL=you@example.com BRAINKB_PASSWORD=*** \
+     docker compose up -d --force-recreate
+   ```
+
+### B. stdio (Claude Code launches the process directly)
 
 ```bash
-claude mcp add brainkb -- python /brainkb_mcp/server.py
-# set the deployment URL (optional; default http://localhost:8010)
-claude mcp add brainkb --env BRAINKB_URL=http://localhost:8010 -- python .../brainkb_mcp/server.py
+claude mcp add --scope user brainkb --env BRAINKB_URL=http://localhost:8010 -- \
+  /abs/path/brainkb_mcp/.venv/bin/python /abs/path/brainkb_mcp/server.py
 ```
 
-…or copy `mcp.config.example.json` into your MCP client config (e.g. project
-`.mcp.json`). If you installed into a virtualenv, point `command` at that venv's
-`python` (e.g. `.venv/bin/python`).
+Point `command` at the venv's `python` (so `mcp`/`httpx` resolve). No container
+needed; the process talks to the query_service at `localhost:8010` directly.
+
+### Notes
+
+- Either way, remove/replace an existing registration first if the name clashes:
+  `claude mcp remove brainkb`.
+- …or copy `mcp.config.example.json` into your MCP client config (e.g. project
+  `.mcp.json`) for the stdio variant.
+- **Local only**: `localhost` registrations work in Claude Code **on this
+  machine**. A cloud/claude.ai session can't reach them — that needs the hosted
+  remote (AWS) with a public URL.
 
 ## Typical flow
 
