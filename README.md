@@ -80,7 +80,7 @@ MCP_TRANSPORT=streamable-http MCP_HOST=0.0.0.0 MCP_PORT=8080 python server.py
 Either add it via the CLI:
 
 ```bash
-claude mcp add brainkb -- python /Users/tekrajchhetri/Documents/brainypedia_codes_design/brainkb_mcp/server.py
+claude mcp add brainkb -- python /brainkb_mcp/server.py
 # set the deployment URL (optional; default http://localhost:8010)
 claude mcp add brainkb --env BRAINKB_URL=http://localhost:8010 -- python .../brainkb_mcp/server.py
 ```
