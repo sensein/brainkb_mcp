@@ -25,28 +25,64 @@ later (set `MCP_TRANSPORT=streamable-http` to serve it).
 
 ## Tools
 
+Authorization is enforced **server-side** (roles → capabilities → space membership
+→ per-space rules); these tools just invoke it and surface `403`s.
+
+### Session
 | Tool | What it does |
 |------|--------------|
 | `brainkb_login(email, password, base_url?)` | Authenticate; cache JWT for this session |
 | `brainkb_whoami()` / `brainkb_logout()` | Session/auth info / forget this session's token |
+
+### Spaces
+| Tool | What it does |
+|------|--------------|
 | `brainkb_list_spaces()` | List spaces you can see (yours + public) |
-| `brainkb_create_space(slug, name, visibility, description?)` | Create a workspace |
-| `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner) |
-| `brainkb_add_space_member(slug, email, role)` | Manage members (owner) |
+| `brainkb_create_space(slug, name, visibility, description?, space_type?)` | Create a workspace — `space_type` `individual` (write-capable role) or `team` (Admin/granted) |
+| `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager) |
+| `brainkb_add_space_member(slug, email, role)` | Manage members (owner/manager) |
 | `brainkb_add_space_graph(slug, graph_iri, description?)` | Register + bind a graph to a space |
+| `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
+
+### Ingest & jobs
+| Tool | What it does |
+|------|--------------|
 | `brainkb_ingest_text(graph_iri, data)` | Ingest raw RDF text → returns `job_id` |
 | `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files → `job_id` |
 | `brainkb_list_jobs(limit?)` / `brainkb_job_status(job_id)` | Ingest status |
 | `brainkb_recover_job(job_id)` | Recover a stuck/errored job |
+
+### Read / search / provenance
+| Tool | What it does |
+|------|--------------|
 | `brainkb_search(q, space?, limit?, offset?)` | Access-filtered full-text search |
-| `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
 | `brainkb_list_registered_graphs()` | List visible registered graphs |
-| `brainkb_sparql(query)` | Arbitrary SPARQL (admin scope) |
+| `brainkb_sparql(query)` | Arbitrary SPARQL (**admin** role) |
 | `brainkb_provenance_job(job_id)` | PROV-O bundle for a job |
 | `brainkb_provenance_graph(graph_iri)` | PROV-O history for a graph |
 | `brainkb_delta(job_id)` | Exact triples a job added |
 | `brainkb_delta_history(graph_iri)` | A graph's change history |
 | `brainkb_delta_compare(job_a, job_b)` | Diff two jobs' deltas |
+
+### Authorization / RBAC (query_service)
+| Tool | What it does |
+|------|--------------|
+| `brainkb_capabilities(member)` | (Admin) A user's roles / effective capabilities / grants |
+| `brainkb_grant_capability(member, capability)` | (Admin) Delegate a capability (e.g. `create_team_space`) |
+| `brainkb_revoke_capability(member, capability)` | (Admin) Revoke a granted capability |
+| `brainkb_list_access_rules(slug)` | List a space's fine-grained access rules |
+| `brainkb_add_access_rule(slug, action, subject_type, subject_value)` | Add a per-space rule (read/write/manage × global_role/member/space_role) |
+| `brainkb_remove_access_rule(slug, rule_id)` | Remove a per-space access rule |
+
+### Admin user management (usermanagement service, `:8004`)
+Require an **Admin/SuperAdmin** role and MCP credentials (env auto-login or `brainkb_login`).
+| Tool | What it does |
+|------|--------------|
+| `brainkb_list_users(q?, role?, limit?)` | List users/profiles |
+| `brainkb_available_roles()` | List roles/groups |
+| `brainkb_create_role(name, category?, description?)` | Create a role/group (e.g. `External`) |
+| `brainkb_assign_role(email, role)` / `brainkb_remove_role(email, role)` | Assign/remove a role by email |
+| `brainkb_activate_user(email)` / `brainkb_deactivate_user(email)` | Activate/deactivate an account |
 
 ## Install
 
