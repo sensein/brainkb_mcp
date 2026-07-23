@@ -88,19 +88,140 @@ from the caller's own token (`sub` claim), and the backend independently verifie
 the token and enforces space access — so a wrong/forged token is rejected, never
 served from another user's context.
 
-## Register with Claude Code
+## Docker / AWS hosting
 
-Either add it via the CLI:
+The image runs the server as the **streamable-http remote** (uvicorn on
+`0.0.0.0:8080`, MCP endpoint at `/mcp`).
+
+### Build & run locally
 
 ```bash
-claude mcp add brainkb -- python /brainkb_mcp/server.py
-# set the deployment URL (optional; default http://localhost:8010)
-claude mcp add brainkb --env BRAINKB_URL=http://localhost:8010 -- python .../brainkb_mcp/server.py
+docker build -t brainkb-mcp:local .
+# point at a query_service on the host (Docker Desktop):
+BRAINKB_URL=http://host.docker.internal:8010 docker compose up
+# MCP now at http://localhost:8080/mcp
 ```
 
-…or copy `mcp.config.example.json` into your MCP client config (e.g. project
-`.mcp.json`). If you installed into a virtualenv, point `command` at that venv's
-`python` (e.g. `.venv/bin/python`).
+Required/runtime env:
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `MCP_TRANSPORT` | `streamable-http` | keep for hosting |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | bind |
+| `BRAINKB_URL` | `http://localhost:8010` | **must** be set to your reachable query_service |
+
+**Local auto-login (optional):** put `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` in a
+git-ignored `.env` next to the compose file (see `.env.example`) so you can skip
+the `brainkb_login` tool. Verify with:
+
+```bash
+docker compose up -d --force-recreate
+docker exec brainkb-mcp python -c "import server as s; print(s._resolve()['email'])"
+```
+
+> **Do this only for local/dev.** Baked-in credentials make *every* caller act as
+> that one user — never do it on the shared remote (see below).
+
+### Deploy on AWS (ECR + ECS/Fargate behind ALB)
+
+```bash
+# 1. push to ECR
+aws ecr create-repository --repository-name brainkb-mcp
+docker tag brainkb-mcp:local <acct>.dkr.ecr.<region>.amazonaws.com/brainkb-mcp:latest
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <acct>.dkr.ecr.<region>.amazonaws.com
+docker push <acct>.dkr.ecr.<region>.amazonaws.com/brainkb-mcp:latest
+```
+
+2. Run it as an ECS/Fargate service (task container port **8080**), with env
+   `BRAINKB_URL` set to the query_service (e.g. an internal ALB / service URL).
+3. Front it with an **Application Load Balancer terminating TLS**; target group →
+   container port 8080. Route53 `mcp.brainkb.org` → ALB. This is the registry
+   remote URL `https://mcp.brainkb.org/mcp`.
+4. Target-group **health check**: TCP on 8080, or HTTP `GET /mcp` with a success
+   matcher of `400-499` (a bare GET returns 406 — that still proves liveness).
+
+Notes for the ALB:
+- **Auth pass-through**: the ALB forwards the `Authorization` header by default —
+  that is how each user authenticates (see [Authentication](#authentication-multi-user-safe)).
+- **Streaming**: streamable-http keeps long-lived responses; raise the ALB **idle
+  timeout** (e.g. 300s) so streams aren't cut. Enable sticky sessions if you rely
+  on per-session `brainkb_login` rather than header auth.
+- Run it behind TLS only — tokens must not travel over plain HTTP.
+
+### Credentials: local vs remote (important)
+
+- **Local/dev** — auto-login via `.env` (`BRAINKB_EMAIL`/`BRAINKB_PASSWORD`) is
+  fine and convenient; the `.env` is git-ignored.
+- **Remote/shared** — do **NOT** set `BRAINKB_EMAIL`/`BRAINKB_PASSWORD` on the
+  hosted container. That would make every caller act as one shared user and defeat
+  multi-user isolation. Instead each user authenticates **per request** with their
+  own `Authorization: Bearer <BrainKB token>` header (forwarded by the ALB). Never
+  commit credentials or put them in the image; if a genuine service identity is
+  ever required, inject it from **AWS Secrets Manager** (ECS `secrets:`), not from
+  a baked-in env var, and scope it minimally.
+
+## Register with Claude Code
+
+There are two ways to register: **stdio** (Claude Code launches the Python
+process) or **HTTP** (Claude Code connects to the running Docker container). Use
+whichever you prefer — both expose the same `brainkb_*` tools.
+
+> Tools load at **session start** — after registering, open a **fresh** Claude
+> Code session for the `brainkb_*` tools to appear. Use `--scope user` so the
+> server is available from any directory (not just this project).
+
+### A. Docker (HTTP / streamable-http) — recommended for testing the hosted setup
+
+1. Run the container (publishes port 8080 and points at the query_service on the
+   host — `host.docker.internal` resolves to your machine on Docker Desktop):
+
+   ```bash
+   cd brainkb_mcp
+   BRAINKB_URL=http://host.docker.internal:8010 docker compose up -d
+   # verify it's serving: 406 on a bare GET is expected (means "up")
+   curl -o /dev/null -w "%{http_code}\n" http://localhost:8080/mcp
+   ```
+
+   Two gotchas this avoids: the port **must be published** (`docker ps` should show
+   `0.0.0.0:8080->8080`, not just `8080/tcp`), and **`BRAINKB_URL` must be
+   `host.docker.internal:8010`, not `localhost`** — inside the container
+   `localhost` is the container, not your stack.
+
+2. Register the HTTP endpoint (note the `/mcp` path):
+
+   ```bash
+   claude mcp add --scope user --transport http brainkb http://localhost:8080/mcp
+   claude mcp list | grep brainkb        # -> brainkb: http://localhost:8080/mcp (HTTP) - ✔ Connected
+   ```
+
+3. Auth: either call `brainkb_login(email, password)` in-session, or bake
+   auto-login into the container:
+
+   ```bash
+   BRAINKB_URL=http://host.docker.internal:8010 \
+   BRAINKB_EMAIL=you@example.com BRAINKB_PASSWORD=*** \
+     docker compose up -d --force-recreate
+   ```
+
+### B. stdio (Claude Code launches the process directly)
+
+```bash
+claude mcp add --scope user brainkb --env BRAINKB_URL=http://localhost:8010 -- \
+  /abs/path/brainkb_mcp/.venv/bin/python /abs/path/brainkb_mcp/server.py
+```
+
+Point `command` at the venv's `python` (so `mcp`/`httpx` resolve). No container
+needed; the process talks to the query_service at `localhost:8010` directly.
+
+### Notes
+
+- Either way, remove/replace an existing registration first if the name clashes:
+  `claude mcp remove brainkb`.
+- …or copy `mcp.config.example.json` into your MCP client config (e.g. project
+  `.mcp.json`) for the stdio variant.
+- **Local only**: `localhost` registrations work in Claude Code **on this
+  machine**. A cloud/claude.ai session can't reach them — that needs the hosted
+  remote (AWS) with a public URL.
 
 ## Typical flow
 
