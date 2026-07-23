@@ -27,8 +27,8 @@ later (set `MCP_TRANSPORT=streamable-http` to serve it).
 
 | Tool | What it does |
 |------|--------------|
-| `brainkb_login(email, password, base_url?)` | Authenticate; cache JWT in memory |
-| `brainkb_whoami()` / `brainkb_set_base_url(url)` | Session info / switch deployment |
+| `brainkb_login(email, password, base_url?)` | Authenticate; cache JWT for this session |
+| `brainkb_whoami()` / `brainkb_logout()` | Session/auth info / forget this session's token |
 | `brainkb_list_spaces()` | List spaces you can see (yours + public) |
 | `brainkb_create_space(slug, name, visibility, description?)` | Create a workspace |
 | `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner) |
