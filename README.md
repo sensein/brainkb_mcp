@@ -88,6 +88,54 @@ from the caller's own token (`sub` claim), and the backend independently verifie
 the token and enforces space access — so a wrong/forged token is rejected, never
 served from another user's context.
 
+## Docker / AWS hosting
+
+The image runs the server as the **streamable-http remote** (uvicorn on
+`0.0.0.0:8080`, MCP endpoint at `/mcp`).
+
+### Build & run locally
+
+```bash
+docker build -t brainkb-mcp:local .
+# point at a query_service on the host (Docker Desktop):
+BRAINKB_URL=http://host.docker.internal:8010 docker compose up
+# MCP now at http://localhost:8080/mcp
+```
+
+Required/runtime env:
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `MCP_TRANSPORT` | `streamable-http` | keep for hosting |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | bind |
+| `BRAINKB_URL` | `http://localhost:8010` | **must** be set to your reachable query_service |
+
+### Deploy on AWS (ECR + ECS/Fargate behind ALB)
+
+```bash
+# 1. push to ECR
+aws ecr create-repository --repository-name brainkb-mcp
+docker tag brainkb-mcp:local <acct>.dkr.ecr.<region>.amazonaws.com/brainkb-mcp:latest
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <acct>.dkr.ecr.<region>.amazonaws.com
+docker push <acct>.dkr.ecr.<region>.amazonaws.com/brainkb-mcp:latest
+```
+
+2. Run it as an ECS/Fargate service (task container port **8080**), with env
+   `BRAINKB_URL` set to the query_service (e.g. an internal ALB / service URL).
+3. Front it with an **Application Load Balancer terminating TLS**; target group →
+   container port 8080. Route53 `mcp.brainkb.org` → ALB. This is the registry
+   remote URL `https://mcp.brainkb.org/mcp`.
+4. Target-group **health check**: TCP on 8080, or HTTP `GET /mcp` with a success
+   matcher of `400-499` (a bare GET returns 406 — that still proves liveness).
+
+Notes for the ALB:
+- **Auth pass-through**: the ALB forwards the `Authorization` header by default —
+  that is how each user authenticates (see [Authentication](#authentication-multi-user-safe)).
+- **Streaming**: streamable-http keeps long-lived responses; raise the ALB **idle
+  timeout** (e.g. 300s) so streams aren't cut. Enable sticky sessions if you rely
+  on per-session `brainkb_login` rather than header auth.
+- Run it behind TLS only — tokens must not travel over plain HTTP.
+
 ## Register with Claude Code
 
 Either add it via the CLI:
