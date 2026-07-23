@@ -199,6 +199,18 @@ def _patch(path: str, json: Any = None) -> Any:
         return {"error": True, "detail": str(e)}
 
 
+def _delete(path: str) -> Any:
+    try:
+        ctx = _resolve()
+        with httpx.Client(timeout=_TIMEOUT) as c:
+            resp = c.delete(f"{ctx['url']}{path}", headers={"Authorization": f"Bearer {ctx['token']}"})
+        return _result(resp)
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+
+
 # --------------------------------------------------------------------------- #
 # auth / session
 # --------------------------------------------------------------------------- #
@@ -259,11 +271,14 @@ def brainkb_list_spaces() -> Any:
 
 @mcp.tool()
 def brainkb_create_space(slug: str, name: str, visibility: str = "private",
-                         description: str = "") -> Any:
-    """Create a workspace/space (private by default). The caller becomes owner.
-    slug: lowercase/hyphen id; visibility: 'private' or 'public'."""
-    return _post("/api/spaces", json={"slug": slug, "name": name,
-                                       "visibility": visibility, "description": description})
+                         description: str = "", space_type: str = "individual") -> Any:
+    """Create a workspace/space. The caller becomes owner.
+    slug: lowercase/hyphen id; visibility: 'private' or 'public';
+    description: short human description (recommended — surfaces in the registry);
+    space_type: 'individual' (a personal space — any write-capable role) or 'team'
+    (a shared space — only Admin/SuperAdmin, or a user granted create_team_space)."""
+    return _post("/api/spaces", json={"slug": slug, "name": name, "visibility": visibility,
+                                       "description": description, "space_type": space_type})
 
 
 @mcp.tool()
@@ -421,6 +436,58 @@ def brainkb_delta_compare(job_id_a: str, job_id_b: str) -> Any:
     """Compare two jobs' deltas: A-only / B-only / shared triple counts + triples."""
     return _get("/api/provenance/delta/compare",
                 params={"user_id": _me(), "job_id_a": job_id_a, "job_id_b": job_id_b})
+
+
+# --------------------------------------------------------------------------- #
+# authorization (RBAC): capability grants + per-space access rules
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def brainkb_capabilities(member: str) -> Any:
+    """(Admin only) Show a user's roles, effective capabilities, and delegated
+    grants. Useful to check why someone can/can't create team spaces, ingest, etc."""
+    return _get("/api/admin/capabilities", params={"member": member})
+
+
+@mcp.tool()
+def brainkb_grant_capability(member: str, capability: str) -> Any:
+    """(Admin only) Delegate a capability to a user — e.g. 'create_team_space' or
+    'manage_team_space' so a Curator/Lab Member can create/manage team spaces.
+    Grantable: create_private_space, create_team_space, manage_team_space, ingest,
+    recover, read_private (NOT the admin-only 'grant'/'sparql_admin')."""
+    return _post("/api/admin/capabilities/grant", json={"member": member, "capability": capability})
+
+
+@mcp.tool()
+def brainkb_revoke_capability(member: str, capability: str) -> Any:
+    """(Admin only) Revoke a previously granted capability from a user."""
+    return _post("/api/admin/capabilities/revoke", json={"member": member, "capability": capability})
+
+
+@mcp.tool()
+def brainkb_list_access_rules(slug: str) -> Any:
+    """List a space's fine-grained access rules (member/manager of the space)."""
+    return _get(f"/api/spaces/{quote(slug)}/access-rules")
+
+
+@mcp.tool()
+def brainkb_add_access_rule(slug: str, action: str, subject_type: str, subject_value: str) -> Any:
+    """(Space manager) Restrict a space action to a subject.
+    action: 'read' | 'write' | 'manage'.
+    subject_type: 'global_role' (e.g. 'Admin','Lab Member') | 'member' (an email) |
+    'space_role' ('viewer'|'editor'|'owner', matched as >=).
+    When rules exist for an action, only matching callers may perform it; the space
+    owner and Admin/SuperAdmin always bypass (no lockout). Example: restrict writing
+    to Admins -> action='write', subject_type='global_role', subject_value='Admin'."""
+    return _post(f"/api/spaces/{quote(slug)}/access-rules",
+                 json={"action": action, "subject_type": subject_type, "subject_value": subject_value})
+
+
+@mcp.tool()
+def brainkb_remove_access_rule(slug: str, rule_id: int) -> Any:
+    """(Space manager) Delete a fine-grained access rule by its id
+    (see brainkb_list_access_rules)."""
+    return _delete(f"/api/spaces/{quote(slug)}/access-rules/{rule_id}")
 
 
 if __name__ == "__main__":
