@@ -110,6 +110,18 @@ Required/runtime env:
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | bind |
 | `BRAINKB_URL` | `http://localhost:8010` | **must** be set to your reachable query_service |
 
+**Local auto-login (optional):** put `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` in a
+git-ignored `.env` next to the compose file (see `.env.example`) so you can skip
+the `brainkb_login` tool. Verify with:
+
+```bash
+docker compose up -d --force-recreate
+docker exec brainkb-mcp python -c "import server as s; print(s._resolve()['email'])"
+```
+
+> **Do this only for local/dev.** Baked-in credentials make *every* caller act as
+> that one user — never do it on the shared remote (see below).
+
 ### Deploy on AWS (ECR + ECS/Fargate behind ALB)
 
 ```bash
@@ -135,6 +147,18 @@ Notes for the ALB:
   timeout** (e.g. 300s) so streams aren't cut. Enable sticky sessions if you rely
   on per-session `brainkb_login` rather than header auth.
 - Run it behind TLS only — tokens must not travel over plain HTTP.
+
+### Credentials: local vs remote (important)
+
+- **Local/dev** — auto-login via `.env` (`BRAINKB_EMAIL`/`BRAINKB_PASSWORD`) is
+  fine and convenient; the `.env` is git-ignored.
+- **Remote/shared** — do **NOT** set `BRAINKB_EMAIL`/`BRAINKB_PASSWORD` on the
+  hosted container. That would make every caller act as one shared user and defeat
+  multi-user isolation. Instead each user authenticates **per request** with their
+  own `Authorization: Bearer <BrainKB token>` header (forwarded by the ALB). Never
+  commit credentials or put them in the image; if a genuine service identity is
+  ever required, inject it from **AWS Secrets Manager** (ECS `secrets:`), not from
+  a baked-in env var, and scope it minimally.
 
 ## Register with Claude Code
 
