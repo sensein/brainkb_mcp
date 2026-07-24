@@ -132,17 +132,26 @@ MCP_TRANSPORT=streamable-http MCP_HOST=0.0.0.0 MCP_PORT=8080 python server.py
 # front with TLS at https://mcp.brainkb.org/mcp
 ```
 
-## Authentication (multi-user safe)
+## Authentication (multi-user safe, single sign-on)
+
+BrainKB uses **single sign-on**: one login mints a short-lived **refresh token**,
+which is exchanged on demand for a narrow, per-service **access token**
+(`aud=query_service`, `aud=usermanagement`, …). A token minted for one service
+can't be replayed against another. The MCP does this exchange for you — a single
+`brainkb_login` now covers both knowledge-graph and admin (usermanagement) tools,
+no second login. If the backend has no SSO, it falls back to legacy per-service
+`/api/token` automatically.
 
 Auth is resolved **per call**, so the hosted remote can serve many users without
 one caller's credentials leaking to another. Resolution order:
 
-1. **`Authorization: Bearer <BrainKB JWT>` header** on the inbound request — the
-   preferred, **stateless** way for the multi-user remote. Each user's client
-   attaches their own token; the server just forwards it to the backend. An
-   optional `X-BrainKB-Base-URL` header overrides the backend URL.
-2. **Per-session login** — `brainkb_login(email, password)` caches a token scoped
-   to *that MCP session only* (convenient for local/stdio use).
+1. **`Authorization: Bearer <token>` header** on the inbound request — the
+   preferred, **stateless** way for the multi-user remote. A **refresh token**
+   here unlocks every service (the MCP exchanges it per service); a single
+   **service access token** works for that service. An optional
+   `X-BrainKB-Base-URL` header overrides the backend URL.
+2. **Per-session login** — `brainkb_login(email, password)` caches the refresh
+   token for *that MCP session only* (convenient for local/stdio use).
 3. **Env auto-login** — `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` (single-user/dev).
 
 There is **no shared/global token**. The `user_id` sent to the backend is derived

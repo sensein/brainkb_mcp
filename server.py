@@ -184,54 +184,162 @@ class _NotAuthed(RuntimeError):
     pass
 
 
-def _resolve() -> Dict[str, str]:
-    """
-    Resolve the auth context for THIS call — multi-user safe.
+# --------------------------------------------------------------------------- #
+# Phase 2 SSO: single login -> per-service token exchange
+# --------------------------------------------------------------------------- #
+# usermanagement is the single issuer. A login mints a REFRESH token; we exchange
+# it for a short-lived per-service ACCESS token (aud=<service>) whenever a tool
+# calls that service. A token minted for one service can't be replayed against
+# another (containment). Legacy per-service /api/token still works as a fallback,
+# so this keeps working against a backend that doesn't yet expose SSO.
 
-    Order of precedence:
-      1. Caller's `Authorization: Bearer <BrainKB JWT>` header (stateless
-         pass-through; how the hosted multi-user remote authenticates each user).
-         `X-BrainKB-Base-URL` header optionally overrides the backend URL.
-      2. Per-session token set by `brainkb_login` (local/stdio convenience).
+_AUD_QUERY = "query_service"
+_AUD_UM = "usermanagement"
+
+
+def _claims(token: str) -> Dict[str, Any]:
+    """Unverified claims of a JWT (for routing only; the server verifies for real)."""
+    import base64
+    import json as _json
+    try:
+        p = token.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return _json.loads(base64.urlsafe_b64decode(p))
+    except Exception:
+        return {}
+
+
+def _um_base(base: str) -> str:
+    """usermanagement base URL for SSO login/exchange, given the query_service base."""
+    base = base.rstrip("/")
+    if base == _DEFAULT_URL:
+        return _UM_URL
+    return base.replace(":8010", ":8004")
+
+
+def _sso_login(um: str, email: str, password: str) -> Optional[str]:
+    """POST /api/auth/login -> refresh token, or None (incl. a backend without SSO)."""
+    try:
+        r = httpx.post(f"{um}/api/auth/login", json={"email": email, "password": password}, timeout=30)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json().get("refresh_token")
+    except Exception:
+        return None
+
+
+def _exchange(um: str, refresh: str, audience: str) -> Optional[tuple]:
+    """POST /api/auth/exchange -> (access_token, ttl_seconds), or None."""
+    try:
+        r = httpx.post(f"{um}/api/auth/exchange",
+                       headers={"Authorization": f"Bearer {refresh}"},
+                       json={"audience": audience}, timeout=30)
+        r.raise_for_status()
+        d = r.json()
+        return d["access_token"], int(d.get("expires_in", 900))
+    except Exception:
+        return None
+
+
+def _legacy_login(base: str, email: str, password: str) -> Optional[str]:
+    """Legacy per-service login (POST /api/token) -> access token, or None."""
+    try:
+        r = httpx.post(f"{base}/api/token", json={"email": email, "password": password}, timeout=30)
+        r.raise_for_status()
+        return r.json().get("access_token")
+    except Exception:
+        return None
+
+
+def _cached_access(sd: dict, aud: str) -> Optional[str]:
+    acc = (sd.get("access") or {}).get(aud)
+    if acc and acc[1] - time.time() > 30:
+        return acc[0]
+    return None
+
+
+def _store_access(sd: dict, aud: str, token: str, ttl: int) -> None:
+    sd.setdefault("access", {})[aud] = (token, time.time() + ttl)
+
+
+def _token_for(audience: str) -> Dict[str, str]:
+    """Resolve an auth context {url, token, email} whose token is valid for
+    `audience` (query_service | usermanagement). Multi-user safe.
+
+    Precedence:
+      1. Caller's `Authorization: Bearer <token>` header. A REFRESH token is
+         exchanged for the requested audience (unlocks every service from one
+         header); any other token is used as-is (works at its own service).
+         `X-BrainKB-Base-URL` optionally overrides the backend URL.
+      2. Per-session credentials/refresh set by `brainkb_login`.
       3. Env `BRAINKB_EMAIL`/`BRAINKB_PASSWORD` auto-login (single-user/dev).
-
-    Returns {url, token, email}. Never stores one caller's token where another
-    caller could read it.
     """
     hdrs = _request_headers()
     base = hdrs.get("x-brainkb-base-url", _DEFAULT_URL).rstrip("/")
+    um = _um_base(base)
+    key = _session_key()
 
     # 1) header pass-through
     authz = hdrs.get("authorization", "")
     if authz[:7].lower() == "bearer " and authz[7:].strip():
-        token = authz[7:].strip()
-        return {"url": base, "token": token, "email": _decode_sub(token) or ""}
+        raw = authz[7:].strip()
+        cl = _claims(raw)
+        if cl.get("typ") == "refresh" or cl.get("aud") == "brainkb-auth":
+            ex = _exchange(um, raw, audience)
+            if ex:
+                return {"url": base, "token": ex[0], "email": cl.get("sub") or ""}
+            raise _NotAuthed(f"Could not exchange the provided refresh token for '{audience}'.")
+        return {"url": base, "token": raw, "email": cl.get("sub") or _decode_sub(raw) or ""}
 
-    # 2) per-session login
-    key = _session_key()
+    # 2) per-session (cached access -> refresh -> legacy)
     if key is not None and key in _SESSIONS:
         sd = _SESSIONS[key]
-        return {"url": sd.get("url", base), "token": sd["token"],
-                "email": sd.get("email") or _decode_sub(sd["token"]) or ""}
+        cached = _cached_access(sd, audience)
+        if cached:
+            return {"url": sd.get("url", base), "token": cached, "email": sd.get("email", "")}
+        if sd.get("refresh"):
+            ex = _exchange(um, sd["refresh"], audience)
+            if ex:
+                _store_access(sd, audience, ex[0], ex[1])
+                return {"url": sd.get("url", base), "token": ex[0], "email": sd.get("email", "")}
+        if sd.get("legacy_token") and audience == _AUD_QUERY:
+            return {"url": sd.get("url", base), "token": sd["legacy_token"], "email": sd.get("email", "")}
 
-    # 3) env auto-login
+    # 3) env auto-login (or session-stored creds, e.g. after refresh expiry)
     em, pw = os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
+    if not (em and pw) and key is not None and key in _SESSIONS:
+        sd = _SESSIONS[key]
+        em, pw = (sd.get("email") or em), (sd.get("password") or pw)
     if em and pw:
-        try:
-            r = httpx.post(f"{base}/api/token", json={"email": em, "password": pw}, timeout=30)
-            r.raise_for_status()
-            token = r.json()["access_token"]
-            if key is not None:
-                _SESSIONS[key] = {"token": token, "url": base, "email": em}
-            return {"url": base, "token": token, "email": em}
-        except Exception:
-            pass
+        refresh = _sso_login(um, em, pw)
+        if refresh:
+            ex = _exchange(um, refresh, audience)
+            if ex:
+                if key is not None:
+                    sd = _SESSIONS.setdefault(key, {})
+                    sd.update({"refresh": refresh, "email": em, "password": pw, "url": base})
+                    _store_access(sd, audience, ex[0], ex[1])
+                return {"url": base, "token": ex[0], "email": em}
+        # legacy fallback (per-service /api/token)
+        legacy = _legacy_login(base if audience == _AUD_QUERY else um, em, pw)
+        if legacy:
+            if key is not None and audience == _AUD_QUERY:
+                _SESSIONS.setdefault(key, {}).update(
+                    {"legacy_token": legacy, "email": em, "password": pw, "url": base})
+            return {"url": base, "token": legacy, "email": em}
 
     raise _NotAuthed(
-        "Not authenticated. On the hosted remote, send an 'Authorization: Bearer "
-        "<BrainKB token>' header. Locally, call brainkb_login(email, password) or "
+        "Not authenticated. On the hosted remote, send 'Authorization: Bearer "
+        "<token>' — a refresh token unlocks all services; a service access token "
+        "works for that service. Locally, call brainkb_login(email, password) or "
         "set BRAINKB_EMAIL / BRAINKB_PASSWORD."
     )
+
+
+def _resolve() -> Dict[str, str]:
+    """Auth context for query_service calls."""
+    return _token_for(_AUD_QUERY)
 
 
 def _me() -> str:
@@ -319,47 +427,29 @@ def _delete(path: str) -> Any:
 # --------------------------------------------------------------------------- #
 # usermanagement service client (admin: users, roles, activation)
 # --------------------------------------------------------------------------- #
-# The usermanagement service (:8004) is a SEPARATE service with its OWN token
-# (per-service auth). We log into it with the same credentials and cache a UM
-# token in-process. Admin endpoints there require an Admin/SuperAdmin role.
+# The usermanagement service (:8004) is a SEPARATE service. Under SSO we reach it
+# with an access token minted for aud=usermanagement (via the single login +
+# exchange in _token_for); no separate login is needed. Legacy /api/token remains
+# the fallback inside _token_for. Admin endpoints require an Admin/SuperAdmin role.
 _UM_URL = (os.getenv("USERMANAGEMENT_URL") or _DEFAULT_URL.replace(":8010", ":8004")).rstrip("/")
-_UM_TOKENS: Dict[str, str] = {}
-
-
-def _creds():
-    """(email, password) for usermanagement login — from the session's brainkb_login
-    password (if provided) or env BRAINKB_EMAIL/BRAINKB_PASSWORD."""
-    key = _session_key()
-    if key is not None and key in _SESSIONS and _SESSIONS[key].get("password"):
-        sd = _SESSIONS[key]
-        return sd.get("email") or os.getenv("BRAINKB_EMAIL"), sd["password"]
-    return os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
-
-
-def _um_login() -> str:
-    email, pw = _creds()
-    if not (email and pw):
-        raise _NotAuthed("usermanagement admin needs credentials — call brainkb_login(email, "
-                         "password) or set BRAINKB_EMAIL/BRAINKB_PASSWORD (OAuth-only tokens "
-                         "can't be used to log into usermanagement).")
-    r = httpx.post(f"{_UM_URL}/api/token", json={"email": email, "password": pw}, timeout=30)
-    r.raise_for_status()
-    tok = r.json()["access_token"]
-    _UM_TOKENS[email] = tok
-    return tok
 
 
 def _um(method: str, path: str, json: Any = None, params: Any = None, _retry: bool = True) -> Any:
     if _retry and not _rate_ok("admin", _RL_ADMIN):
         return _rl_error("admin", _RL_ADMIN)
+    base = _request_headers().get("x-brainkb-base-url", _DEFAULT_URL).rstrip("/")
+    um = _um_base(base)
     try:
-        email, _ = _creds()
-        tok = _UM_TOKENS.get(email) or _um_login()
+        ctx = _token_for(_AUD_UM)
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.request(method, f"{_UM_URL}{path}",
-                             headers={"Authorization": f"Bearer {tok}"}, json=json, params=params)
+            resp = c.request(method, f"{um}{path}",
+                             headers={"Authorization": f"Bearer {ctx['token']}"}, json=json, params=params)
         if resp.status_code == 401 and _retry:
-            _UM_TOKENS.pop(email, None)
+            # The access token may have expired — drop the cached usermanagement
+            # token so _token_for re-exchanges, and retry once.
+            key = _session_key()
+            if key is not None and key in _SESSIONS:
+                (_SESSIONS[key].get("access") or {}).pop(_AUD_UM, None)
             return _um(method, path, json=json, params=params, _retry=False)
         return _result(resp)
     except _NotAuthed as e:
@@ -422,26 +512,39 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
     """Authenticate to BrainKB with the user's credentials and cache the JWT for
     THIS session only (isolated per caller). The password/token are never echoed.
 
-    On the hosted multi-user remote you can skip this and instead have your client
-    send an 'Authorization: Bearer <BrainKB token>' header — that is the preferred,
-    stateless way to authenticate per user."""
+    Uses single sign-on: one login mints a refresh token, cached for THIS session,
+    which is exchanged on demand for per-service access tokens (query_service,
+    usermanagement, …). Falls back to a legacy per-service token if the backend
+    has no SSO. On the hosted multi-user remote you can skip this and instead have
+    your client send an 'Authorization: Bearer <token>' header (a refresh token
+    unlocks all services)."""
     if not _rate_ok("auth", _RL_AUTH):
         return _rl_error("auth", _RL_AUTH)["detail"]
     key = _session_key()
     base = (base_url or _DEFAULT_URL).rstrip("/")
+    um = _um_base(base)
     try:
-        r = httpx.post(f"{base}/api/token", json={"email": email, "password": password}, timeout=30)
-        r.raise_for_status()
-        token = r.json()["access_token"]
+        # SSO first: single login -> refresh token (exchanged per service later).
+        refresh = _sso_login(um, email, password)
+        if refresh:
+            if key is None:
+                return ("Logged in, but this session could not be identified to cache the "
+                        "token; send an Authorization header instead.")
+            # Credentials kept in memory for THIS session only, to re-login if the
+            # refresh token expires. Never echoed.
+            _SESSIONS[key] = {"refresh": refresh, "url": base, "email": email,
+                              "password": password, "access": {}}
+            return f"Logged in as {email} at {base} (SSO; this session)."
+        # Legacy fallback: per-service query_service token.
+        legacy = _legacy_login(base, email, password)
+        if not legacy:
+            return "Login failed. Check email/password and base_url."
         if key is None:
-            return ("Logged in, but this session could not be identified to cache the "
-                    "token; send an Authorization header instead.")
-        # Password kept in memory for this session only, so admin actions on the
-        # separate usermanagement service can log in with the same credentials.
-        _SESSIONS[key] = {"token": token, "url": base, "email": email, "password": password}
+            return ("Logged in (legacy), but this session could not be identified to cache "
+                    "the token; send an Authorization header instead.")
+        _SESSIONS[key] = {"legacy_token": legacy, "url": base, "email": email,
+                          "password": password, "access": {}}
         return f"Logged in as {email} at {base} (this session)."
-    except httpx.HTTPStatusError as e:
-        return f"Login failed (HTTP {e.response.status_code}). Check email/password and base_url."
     except Exception as e:
         return f"Login error: {e}"
 
