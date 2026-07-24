@@ -31,7 +31,6 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 ### Session
 | Tool | What it does |
 |------|--------------|
-| `brainkb_register(full_name, email, password, base_url?)` | Self-register a new account (no login); creates a profile + default role, starts **inactive** until an admin activates it |
 | `brainkb_login(email, password, base_url?)` | Password login; caches the session token |
 | `brainkb_globus_login(provider?)` | Start OAuth (Globus/ORCID/GitHub) login → returns a URL to open; browser shows a one-time code |
 | `brainkb_finish_login(code)` | Complete OAuth login by pasting the code the browser showed |
@@ -106,7 +105,7 @@ exempt. Over-limit calls return HTTP `429`.
 |-----|---------|--------|
 | `MCP_RATELIMIT_ENABLED` | `true` | Master switch (`false` to disable) |
 | `MCP_RATELIMIT_WINDOW_SEC` | `60` | Window length (seconds) |
-| `MCP_RATELIMIT_AUTH_PER_MIN` | `8` | `brainkb_register` / `brainkb_login` (brute-force) |
+| `MCP_RATELIMIT_AUTH_PER_MIN` | `8` | `brainkb_login` / `brainkb_globus_login` (brute-force) |
 | `MCP_RATELIMIT_WRITE_PER_MIN` | `40` | mutations / ingest |
 | `MCP_RATELIMIT_READ_PER_MIN` | `120` | reads |
 | `MCP_RATELIMIT_ADMIN_PER_MIN` | `30` | usermanagement admin calls |
@@ -162,6 +161,12 @@ one caller's credentials leaking to another. Resolution order:
    `brainkb_globus_login` → `brainkb_finish_login`) caches the refresh token for
    *that MCP session only*.
 3. **Env auto-login** — `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` (single-user/dev).
+
+**Onboarding = first login (no self-registration).** New users are created
+automatically the first time they sign in with **Globus/ORCID/GitHub**
+(`brainkb_globus_login` → `brainkb_finish_login`); there is no separate register
+step (the backend `/api/register` is disabled). Password login (`brainkb_login`)
+works for accounts that already exist.
 
 **Sessions expire — logins are not forever.** A cached session lasts until its
 refresh token expires (`USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN`, default 12h),

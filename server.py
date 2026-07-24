@@ -263,13 +263,18 @@ def _exchange(um: str, refresh: str, audience: str) -> Optional[tuple]:
 
 
 def _legacy_login(base: str, email: str, password: str) -> Optional[str]:
-    """Legacy per-service login (POST /api/token) -> access token, or None."""
-    try:
-        r = httpx.post(f"{base}/api/token", json={"email": email, "password": password}, timeout=30)
-        r.raise_for_status()
-        return r.json().get("access_token")
-    except Exception:
-        return None
+    """Legacy per-service password login -> access token, or None. Prefers
+    /api/login; falls back to the deprecated /api/token for older backends."""
+    for path in ("/api/login", "/api/token"):
+        try:
+            r = httpx.post(f"{base}{path}", json={"email": email, "password": password}, timeout=30)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            return r.json().get("access_token")
+        except Exception:
+            continue
+    return None
 
 
 def _cached_access(sd: dict, aud: str) -> Optional[str]:
@@ -497,40 +502,9 @@ def _um_profile_id(email: str) -> Optional[int]:
 # auth / session
 # --------------------------------------------------------------------------- #
 
-@mcp.tool()
-def brainkb_register(full_name: str, email: str, password: str, base_url: str = "") -> str:
-    """Self-register a new BrainKB account (no login required).
-
-    Creates the credential plus a canonical user profile with a default role, so
-    the new user is a first-class identity (not a role-less orphan). The account
-    starts INACTIVE — an Admin/SuperAdmin must activate it (brainkb_activate_user)
-    before it can log in. The password is never echoed."""
-    if not _rate_ok("auth", _RL_AUTH):
-        return _rl_error("auth", _RL_AUTH)["detail"]
-    base = (base_url or _DEFAULT_URL).rstrip("/")
-    try:
-        r = httpx.post(
-            f"{base}/api/register",
-            json={"full_name": full_name, "email": email, "password": password},
-            timeout=30,
-        )
-        r.raise_for_status()
-        detail = ""
-        try:
-            detail = r.json().get("detail", "")
-        except Exception:
-            pass
-        return detail or (
-            f"Registered {email}. An admin must activate the account before login.")
-    except httpx.HTTPStatusError as e:
-        msg = ""
-        try:
-            msg = e.response.json().get("detail", "")
-        except Exception:
-            pass
-        return f"Registration failed (HTTP {e.response.status_code})" + (f": {msg}" if msg else ".")
-    except Exception as e:
-        return f"Registration error: {e}"
+# NOTE: there is no self-registration tool. Users are onboarded by signing in with
+# Globus/ORCID/GitHub (brainkb_globus_login), which auto-creates and links their
+# profile on first login. There is no separate "register" step.
 
 
 @mcp.tool()
