@@ -12,6 +12,10 @@ Transport: stdio (default). Run with:  python server.py
 
 Configuration (env, all optional):
   BRAINKB_URL       Base URL of the query_service (default http://localhost:8010)
+  BRAINKB_TOKEN     A Personal Access Token (brainkb_pat_...) — the recommended,
+                    browser-free way to authenticate. Mint one with
+                    brainkb_create_token() after logging in once, then paste it
+                    here; no login/browser is needed afterward until it expires.
   BRAINKB_EMAIL     Auto-login email (else call brainkb_login)
   BRAINKB_PASSWORD  Auto-login password
 
@@ -262,6 +266,30 @@ def _exchange(um: str, refresh: str, audience: str) -> Optional[tuple]:
         return None
 
 
+_PAT_PREFIX = "brainkb_pat_"
+
+
+def _is_pat(token: str) -> bool:
+    """True if the string is a BrainKB Personal Access Token (opaque, not a JWT)."""
+    return bool(token) and token.strip().startswith(_PAT_PREFIX)
+
+
+def _pat_exchange(um: str, pat: str, audience: str) -> Optional[tuple]:
+    """POST /api/auth/pat/exchange -> (access_token, ttl_seconds), or None. A PAT is
+    an opaque, revocable, long-lived credential; it is exchanged for a short-lived
+    per-service access token exactly like a refresh token, but needs no browser."""
+    try:
+        r = httpx.post(f"{um}/api/auth/pat/exchange",
+                       json={"token": pat, "audience": audience}, timeout=30)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        d = r.json()
+        return d["access_token"], int(d.get("expires_in", 900))
+    except Exception:
+        return None
+
+
 def _legacy_login(base: str, email: str, password: str) -> Optional[str]:
     """Legacy per-service password login -> access token, or None. Prefers
     /api/login; falls back to the deprecated /api/token for older backends."""
@@ -309,6 +337,14 @@ def _token_for(audience: str) -> Dict[str, str]:
     authz = hdrs.get("authorization", "")
     if authz[:7].lower() == "bearer " and authz[7:].strip():
         raw = authz[7:].strip()
+        # A Personal Access Token is opaque (not a JWT); exchange it for the
+        # requested service audience — one PAT unlocks every service.
+        if _is_pat(raw):
+            ex = _pat_exchange(um, raw, audience)
+            if ex:
+                return {"url": base, "token": ex[0], "email": _decode_sub(ex[0]) or ""}
+            raise _NotAuthed(f"Could not exchange the provided access token for '{audience}' "
+                             "(it may be expired or revoked).")
         cl = _claims(raw)
         if cl.get("typ") == "refresh" or cl.get("aud") == "brainkb-auth":
             ex = _exchange(um, raw, audience)
@@ -327,6 +363,12 @@ def _token_for(audience: str) -> Dict[str, str]:
         cached = _cached_access(sd, audience)
         if cached:
             return {"url": sd.get("url", base), "token": cached, "email": sd.get("email", "")}
+        if sd.get("pat"):
+            ex = _pat_exchange(um, sd["pat"], audience)
+            if ex:
+                _store_access(sd, audience, ex[0], ex[1])
+                return {"url": sd.get("url", base), "token": ex[0],
+                        "email": sd.get("email") or _decode_sub(ex[0]) or ""}
         if sd.get("refresh"):
             ex = _exchange(um, sd["refresh"], audience)
             if ex:
@@ -335,7 +377,20 @@ def _token_for(audience: str) -> Dict[str, str]:
         if sd.get("legacy_token") and audience == _AUD_QUERY:
             return {"url": sd.get("url", base), "token": sd["legacy_token"], "email": sd.get("email", "")}
 
-    # 3) env auto-login (or session-stored creds, e.g. after refresh expiry)
+    # 3) env Personal Access Token (browser-free: mint once, paste into config).
+    pat_env = os.getenv("BRAINKB_TOKEN", "").strip()
+    if _is_pat(pat_env):
+        ex = _pat_exchange(um, pat_env, audience)
+        if ex:
+            email = _decode_sub(ex[0]) or ""
+            if key is not None:
+                sd = _SESSIONS.setdefault(key, {})
+                sd.update({"pat": pat_env, "email": email or sd.get("email", ""),
+                           "url": base, "access": sd.get("access", {})})
+                _store_access(sd, audience, ex[0], ex[1])
+            return {"url": base, "token": ex[0], "email": email}
+
+    # 4) env auto-login (or session-stored creds, e.g. after refresh expiry)
     em, pw = os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
     if not (em and pw) and key is not None and key in _SESSIONS:
         sd = _SESSIONS[key]
@@ -361,10 +416,12 @@ def _token_for(audience: str) -> Dict[str, str]:
 
     raise _NotAuthed(
         "Not authenticated (or your session has expired — sessions don't last "
-        "forever). Log in again: brainkb_login(email, password), or "
-        "brainkb_globus_login() for Globus/ORCID/GitHub. On the hosted remote, send "
-        "'Authorization: Bearer <token>' (a refresh token unlocks all services). "
-        "Single-user/dev may set BRAINKB_EMAIL / BRAINKB_PASSWORD."
+        "forever). Easiest: set BRAINKB_TOKEN to a Personal Access Token "
+        "(brainkb_pat_...) in your config — mint one with brainkb_create_token() "
+        "after logging in once, and no browser is needed afterward. Or log in now: "
+        "brainkb_login(email, password), brainkb_globus_login() for Globus/ORCID/"
+        "GitHub, or brainkb_use_token(pat). On the hosted remote, send "
+        "'Authorization: Bearer <token>' (a PAT or refresh token unlocks all services)."
     )
 
 
@@ -630,6 +687,67 @@ def brainkb_whoami() -> Dict[str, Any]:
     except _NotAuthed as e:
         return {"base_url": _DEFAULT_URL, "email": None, "authenticated": False,
                 "hint": "Session may have expired — log in again (brainkb_login / brainkb_globus_login)."}
+
+
+# --------------------------------------------------------------------------- #
+# personal access tokens (browser-free, long-lived, revocable)
+# --------------------------------------------------------------------------- #
+# A PAT lets the user authenticate WITHOUT a browser after a one-time login: mint
+# it once (while logged in), paste it into the config as BRAINKB_TOKEN, and every
+# call thereafter authenticates with it until it expires or is revoked. The PAT is
+# opaque (not a key/JWT); the user handles a single string, never a key.
+
+
+@mcp.tool()
+def brainkb_create_token(name: str = "", days: int = 90) -> Any:
+    """Generate a Personal Access Token (PAT) for browser-free auth. Requires you
+    to be logged in already (brainkb_login or brainkb_globus_login). The token is
+    shown ONCE and never again — copy it and set it as BRAINKB_TOKEN in your
+    MCP/skill config; then no login or browser is needed until it expires.
+    `name`: a label so you can tell tokens apart (e.g. 'laptop'). `days`: lifetime
+    (default 90, server-capped). Treat the returned token like a password."""
+    if not _rate_ok("auth", _RL_AUTH):
+        return _rl_error("auth", _RL_AUTH)
+    return _um("POST", "/api/auth/tokens", json={"name": name, "days": days})
+
+
+@mcp.tool()
+def brainkb_list_tokens() -> Any:
+    """List your Personal Access Tokens (metadata only — the secret is never
+    shown): id, name, prefix, created/last-used/expiry, and whether each is
+    active/revoked/expired. Use the id with brainkb_revoke_token."""
+    return _um("GET", "/api/auth/tokens")
+
+
+@mcp.tool()
+def brainkb_revoke_token(token_id: int) -> Any:
+    """Revoke one of your Personal Access Tokens by id (see brainkb_list_tokens).
+    Takes effect immediately — the next call using that token fails."""
+    return _um("DELETE", f"/api/auth/tokens/{int(token_id)}")
+
+
+@mcp.tool()
+def brainkb_use_token(token: str, base_url: str = "") -> str:
+    """Use a Personal Access Token (brainkb_pat_...) for THIS session — an
+    alternative to setting BRAINKB_TOKEN in the config. Validates the token, then
+    caches it so subsequent calls authenticate with it. The token is never echoed."""
+    if not _rate_ok("auth", _RL_AUTH):
+        return _rl_error("auth", _RL_AUTH)["detail"]
+    key = _session_key()
+    base = (base_url or _DEFAULT_URL).rstrip("/")
+    um = _um_base(base)
+    if not _is_pat(token):
+        return "That doesn't look like a BrainKB access token (expected brainkb_pat_...)."
+    ex = _pat_exchange(um, token.strip(), _AUD_QUERY)
+    if not ex:
+        return "That token is invalid, expired, or revoked. Mint a new one with brainkb_create_token()."
+    email = _decode_sub(ex[0]) or ""
+    if key is None:
+        return ("Token accepted, but this session could not be identified to cache it; "
+                "set BRAINKB_TOKEN in your config or send an Authorization header instead.")
+    _SESSIONS[key] = {"pat": token.strip(), "url": base, "email": email, "access": {}}
+    _store_access(_SESSIONS[key], _AUD_QUERY, ex[0], ex[1])
+    return f"Access token accepted for {email or 'your account'} at {base} (this session)."
 
 
 # --------------------------------------------------------------------------- #
