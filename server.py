@@ -30,8 +30,10 @@ or returned to the model.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -59,9 +61,15 @@ _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 _UPLOAD_TIMEOUT = httpx.Timeout(None, connect=30.0)
 
 # Per-session login store (fallback for local/stdio use only), keyed by the MCP
-# session's identity. The hosted multi-user remote does NOT rely on this — each
+# session OBJECT itself. The hosted multi-user remote does NOT rely on this — each
 # call carries the caller's own token via the Authorization header (stateless).
-_SESSIONS: Dict[int, Dict[str, str]] = {}
+#
+# Keyed weakly by the session object, never by id(): an address is recycled once
+# the object is collected, so an id()-keyed store can hand a brand-new session the
+# previous occupant's cached refresh token (wrong-user auth), and it also loses
+# writes whenever the address shifts between two calls of the same login. The weak
+# keys additionally let dead sessions' credentials be reclaimed automatically.
+_SESSIONS: "weakref.WeakKeyDictionary[Any, Dict[str, str]]" = weakref.WeakKeyDictionary()
 
 
 # --------------------------------------------------------------------------- #
@@ -81,11 +89,42 @@ def _decode_sub(token: str) -> Optional[str]:
         return None
 
 
-def _session_key() -> Optional[int]:
+_warned_unkeyable = False
+
+
+def _session_key() -> Optional[Any]:
+    """The current MCP session object, used as the _SESSIONS key.
+
+    Returns the object, not id(it): addresses are reused after garbage collection,
+    which both drops writes (login cached under one address, read under another)
+    and can hand a new session the previous occupant's cached token.
+
+    A session that cannot be weak-referenced or hashed cannot be cached under.
+    That returns None — but LOUDLY: it is reported on stderr, and every caller of
+    this function surfaces the condition to the user instead of silently behaving
+    as though no one had logged in.
+    """
+    global _warned_unkeyable
     try:
-        return id(mcp.get_context().session)
+        sess = mcp.get_context().session
     except Exception:
+        # No MCP request context (direct/unit-test call) — expected, not an error.
         return None
+    try:
+        weakref.ref(sess)
+        hash(sess)
+    except TypeError as e:
+        if not _warned_unkeyable:
+            _warned_unkeyable = True
+            print(
+                f"[brainkb-mcp] WARNING: MCP session objects of type "
+                f"{type(sess).__name__!r} cannot be used as a session-cache key "
+                f"({e}). Per-session login is DISABLED — authenticate with "
+                f"BRAINKB_TOKEN or an 'Authorization: Bearer' header instead.",
+                file=sys.stderr, flush=True,
+            )
+        return None
+    return sess
 
 
 def _request_headers() -> Dict[str, str]:
