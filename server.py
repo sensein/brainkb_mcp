@@ -550,6 +550,59 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
 
 
 @mcp.tool()
+def brainkb_globus_login(provider: str = "globus", base_url: str = "") -> str:
+    """Start an OAuth login (Globus / ORCID / GitHub) for THIS session — use this
+    instead of brainkb_login when the user signs in with Globus rather than a
+    password. Returns a URL to open in a browser; after signing in, the page shows
+    a short one-time code — pass it to brainkb_finish_login(code) to complete.
+    (The browser step is unavoidable: only the user can consent at the provider.)"""
+    if not _rate_ok("auth", _RL_AUTH):
+        return _rl_error("auth", _RL_AUTH)["detail"]
+    base = (base_url or _DEFAULT_URL).rstrip("/")
+    um = _um_base(base)
+    try:
+        r = httpx.post(f"{um}/api/auth/cli/start", json={"provider": provider}, timeout=30)
+        r.raise_for_status()
+        url = r.json()["authorize_url"]
+        return (f"Open this URL in a browser and sign in with {provider}:\n{url}\n\n"
+                "After signing in, the page shows a short code — call "
+                "brainkb_finish_login(\"<code>\") with it to finish.")
+    except httpx.HTTPStatusError as e:
+        return (f"Could not start {provider} login (HTTP {e.response.status_code}). "
+                f"Is {provider} OAuth configured on the server?")
+    except Exception as e:
+        return f"Login start error: {e}"
+
+
+@mcp.tool()
+def brainkb_finish_login(code: str, base_url: str = "") -> str:
+    """Complete an OAuth login started with brainkb_globus_login by exchanging the
+    one-time code shown in the browser for a session token. The code is single-use
+    and never echoed back."""
+    if not _rate_ok("auth", _RL_AUTH):
+        return _rl_error("auth", _RL_AUTH)["detail"]
+    key = _session_key()
+    base = (base_url or _DEFAULT_URL).rstrip("/")
+    um = _um_base(base)
+    try:
+        r = httpx.post(f"{um}/api/auth/cli/exchange", json={"code": code}, timeout=30)
+        if r.status_code >= 400:
+            return ("That code is invalid, expired, or already used. Start again with "
+                    "brainkb_globus_login.")
+        refresh = r.json()["refresh_token"]
+        if key is None:
+            return ("Login completed, but this session could not be identified to cache "
+                    "the token; send an Authorization header (refresh token) instead.")
+        email = _decode_sub(refresh) or ""
+        # OAuth session: no password stored (can't password re-login); the refresh
+        # token drives per-service SSO exchange like a normal login.
+        _SESSIONS[key] = {"refresh": refresh, "url": base, "email": email, "access": {}}
+        return f"Logged in as {email or 'your account'} at {base} (via OAuth SSO; this session)."
+    except Exception as e:
+        return f"Finish login error: {e}"
+
+
+@mcp.tool()
 def brainkb_logout() -> str:
     """Forget the cached token for this session."""
     key = _session_key()

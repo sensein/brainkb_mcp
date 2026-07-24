@@ -32,7 +32,9 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | Tool | What it does |
 |------|--------------|
 | `brainkb_register(full_name, email, password, base_url?)` | Self-register a new account (no login); creates a profile + default role, starts **inactive** until an admin activates it |
-| `brainkb_login(email, password, base_url?)` | Authenticate; cache JWT for this session |
+| `brainkb_login(email, password, base_url?)` | Password login; caches the session token |
+| `brainkb_globus_login(provider?)` | Start OAuth (Globus/ORCID/GitHub) login → returns a URL to open; browser shows a one-time code |
+| `brainkb_finish_login(code)` | Complete OAuth login by pasting the code the browser showed |
 | `brainkb_whoami()` / `brainkb_logout()` | Session/auth info / forget this session's token |
 
 ### Spaces
