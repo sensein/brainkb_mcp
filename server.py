@@ -785,6 +785,38 @@ def brainkb_revoke_capability(member: str, capability: str) -> Any:
 
 
 @mcp.tool()
+def brainkb_list_capabilities() -> Any:
+    """(Admin only) Catalog of all KG capabilities, which are delegatable
+    ('grantable'), which are admin-only, and a description of each. Use this to see
+    the available permission options before granting to a user or group/role."""
+    return _get("/api/admin/capabilities/available")
+
+
+@mcp.tool()
+def brainkb_role_capabilities(role: str) -> Any:
+    """(Admin only) List the capabilities granted to a role/group (e.g.
+    'uk_collaborator', 'Lab Member')."""
+    return _get("/api/admin/capabilities/role", params={"role": role})
+
+
+@mcp.tool()
+def brainkb_grant_role_capability(role: str, capability: str) -> Any:
+    """(Admin only) Grant a capability to a whole role/group so EVERY member gets
+    it — e.g. give a custom group 'uk_collaborator' the 'ingest' or
+    'create_private_space' capability. Grantable: create_private_space,
+    create_team_space, manage_team_space, ingest, recover, read_private (NOT the
+    admin-only 'grant'/'sparql_admin'). Create the group first with
+    brainkb_create_role, then assign it to users with brainkb_assign_role."""
+    return _post("/api/admin/capabilities/grant-role", json={"role": role, "capability": capability})
+
+
+@mcp.tool()
+def brainkb_revoke_role_capability(role: str, capability: str) -> Any:
+    """(Admin only) Revoke a capability from a role/group."""
+    return _post("/api/admin/capabilities/revoke-role", json={"role": role, "capability": capability})
+
+
+@mcp.tool()
 def brainkb_list_access_rules(slug: str) -> Any:
     """List a space's fine-grained access rules (member/manager of the space)."""
     return _get(f"/api/spaces/{quote(slug)}/access-rules")
@@ -842,8 +874,10 @@ def brainkb_create_role(name: str, category: str = "Content", description: str =
 
 @mcp.tool()
 def brainkb_assign_role(email: str, role: str) -> Any:
-    """(Admin) Assign a role/group to a user by email (e.g. 'Admin', 'Lab Member',
-    'External'). The user must already have a profile (created on first login)."""
+    """(Admin) Assign a role/group to a user by email (e.g. 'Lab Member', 'External',
+    or a custom group). The user must already have a profile (created on first
+    login/registration). NOTE: assigning the 'Admin'/'SuperAdmin' role is
+    SuperAdmin-only (hierarchy: SuperAdmin > Admin)."""
     pid = _um_profile_id(email)
     if not pid:
         return {"error": True, "detail": f"no profile found for {email} — the user must sign in "
@@ -870,6 +904,43 @@ def brainkb_activate_user(email: str) -> Any:
 def brainkb_deactivate_user(email: str) -> Any:
     """(Admin) Deactivate a user's account by email."""
     return _um("POST", "/api/admin/users/deactivate", json={"email": email})
+
+
+@mcp.tool()
+def brainkb_ban_user(email: str, reason: str) -> Any:
+    """(Admin) Ban a user by email (reversible; preserves history). This is how
+    accounts are removed — there is NO hard delete. Banning an Admin is
+    SuperAdmin-only; SuperAdmin accounts cannot be banned."""
+    pid = _um_profile_id(email)
+    if not pid:
+        return {"error": True, "detail": f"no profile found for {email}"}
+    return _um("POST", f"/api/admin/users/{pid}/ban", json={"reason": reason})
+
+
+@mcp.tool()
+def brainkb_unban_user(email: str) -> Any:
+    """(Admin) Lift a ban on a user by email."""
+    pid = _um_profile_id(email)
+    if not pid:
+        return {"error": True, "detail": f"no profile found for {email}"}
+    return _um("DELETE", f"/api/admin/users/{pid}/ban")
+
+
+@mcp.tool()
+def brainkb_list_permissions() -> Any:
+    """(Admin) List all usermanagement permissions (resource/action pairs used for
+    page-access and role-permission mapping). These are the addable 'permission'
+    options; KG action-capabilities are listed by brainkb_list_capabilities."""
+    return _um("GET", "/api/admin/permissions")
+
+
+@mcp.tool()
+def brainkb_create_permission(name: str, resource: str, action: str, description: str = "") -> Any:
+    """(Admin) Create a new usermanagement permission, e.g.
+    name='dataset.export', resource='dataset', action='export'. Attach it to roles
+    via the usermanagement role-permissions API."""
+    return _um("POST", "/api/admin/permissions",
+               json={"name": name, "resource": resource, "action": action, "description": description})
 
 
 if __name__ == "__main__":

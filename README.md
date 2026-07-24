@@ -68,22 +68,28 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 ### Authorization / RBAC (query_service)
 | Tool | What it does |
 |------|--------------|
+| `brainkb_list_capabilities()` | (Admin) Catalog of KG capabilities — all / grantable / admin-only + meanings |
 | `brainkb_capabilities(member)` | (Admin) A user's roles / effective capabilities / grants |
-| `brainkb_grant_capability(member, capability)` | (Admin) Delegate a capability (e.g. `create_team_space`) |
-| `brainkb_revoke_capability(member, capability)` | (Admin) Revoke a granted capability |
+| `brainkb_grant_capability(member, capability)` / `brainkb_revoke_capability(...)` | (Admin) Delegate/revoke a capability to an **individual** |
+| `brainkb_role_capabilities(role)` | (Admin) Capabilities granted to a role/group |
+| `brainkb_grant_role_capability(role, capability)` / `brainkb_revoke_role_capability(...)` | (Admin) Grant/revoke a capability to a whole **group/role** (e.g. `uk_collaborator`) |
 | `brainkb_list_access_rules(slug)` | List a space's fine-grained access rules |
-| `brainkb_add_access_rule(slug, action, subject_type, subject_value)` | Add a per-space rule (read/write/manage × global_role/member/space_role) |
+| `brainkb_add_access_rule(slug, action, subject_type, subject_value)` | Add a per-space rule (read/write/manage × global_role/member/space_role) — a write rule GRANTS a group ingest into that space |
 | `brainkb_remove_access_rule(slug, rule_id)` | Remove a per-space access rule |
 
 ### Admin user management (usermanagement service, `:8004`)
 Require an **Admin/SuperAdmin** role and MCP credentials (env auto-login or `brainkb_login`).
+Assigning/removing the `Admin` role and banning an Admin are **SuperAdmin-only**.
 | Tool | What it does |
 |------|--------------|
 | `brainkb_list_users(q?, role?, limit?)` | List users/profiles |
 | `brainkb_available_roles()` | List roles/groups |
-| `brainkb_create_role(name, category?, description?)` | Create a role/group (e.g. `External`) |
-| `brainkb_assign_role(email, role)` / `brainkb_remove_role(email, role)` | Assign/remove a role by email |
-| `brainkb_activate_user(email)` / `brainkb_deactivate_user(email)` | Activate/deactivate an account |
+| `brainkb_create_role(name, category?, description?)` | Create a role/group/category (e.g. `uk_collaborator`) |
+| `brainkb_assign_role(email, role)` / `brainkb_remove_role(email, role)` | Assign/remove a role by email (Admin role = SuperAdmin-only) |
+| `brainkb_list_permissions()` | List usermanagement permissions (resource/action) |
+| `brainkb_create_permission(name, resource, action, description?)` | Add a new permission |
+| `brainkb_activate_user(email)` / `brainkb_deactivate_user(email)` | Activate/deactivate login access |
+| `brainkb_ban_user(email, reason)` / `brainkb_unban_user(email)` | Ban/unban — the removal mechanism (**no hard delete**; reversible) |
 
 ## Rate limiting & payload guards
 
