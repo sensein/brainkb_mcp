@@ -158,9 +158,16 @@ one caller's credentials leaking to another. Resolution order:
    here unlocks every service (the MCP exchanges it per service); a single
    **service access token** works for that service. An optional
    `X-BrainKB-Base-URL` header overrides the backend URL.
-2. **Per-session login** — `brainkb_login(email, password)` caches the refresh
-   token for *that MCP session only* (convenient for local/stdio use).
+2. **Per-session login** — `brainkb_login(email, password)` (or
+   `brainkb_globus_login` → `brainkb_finish_login`) caches the refresh token for
+   *that MCP session only*.
 3. **Env auto-login** — `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` (single-user/dev).
+
+**Sessions expire — logins are not forever.** A cached session lasts until its
+refresh token expires (`USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN`, default 12h),
+hard-capped by `MCP_SESSION_TTL_MIN` (default 720). When it lapses the MCP forgets
+the cached credentials and the next call returns "not authenticated — log in
+again"; `brainkb_whoami` reports `session_expires_in_min`.
 
 There is **no shared/global token**. The `user_id` sent to the backend is derived
 from the caller's own token (`sub` claim), and the backend independently verifies

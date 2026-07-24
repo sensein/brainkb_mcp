@@ -196,6 +196,11 @@ class _NotAuthed(RuntimeError):
 _AUD_QUERY = "query_service"
 _AUD_UM = "usermanagement"
 
+# A cached login is not forever: the session expires with its refresh token (or,
+# as a hard cap even if credentials are cached, after MCP_SESSION_TTL_MIN). When it
+# lapses the session is forgotten and the user must log in again.
+_SESSION_TTL_MIN = _int_env("MCP_SESSION_TTL_MIN", 720)  # fallback when no exp claim
+
 
 def _claims(token: str) -> Dict[str, Any]:
     """Unverified claims of a JWT (for routing only; the server verifies for real)."""
@@ -207,6 +212,21 @@ def _claims(token: str) -> Dict[str, Any]:
         return _json.loads(base64.urlsafe_b64decode(p))
     except Exception:
         return {}
+
+
+def _session_expiry(token: str) -> float:
+    """Absolute expiry (epoch seconds) for a cached session: the token's `exp`
+    claim, capped by MCP_SESSION_TTL_MIN, falling back to now + TTL if no exp."""
+    cap = time.time() + _SESSION_TTL_MIN * 60
+    exp = _claims(token).get("exp")
+    if isinstance(exp, (int, float)) and exp > 0:
+        return min(float(exp), cap)
+    return cap
+
+
+def _session_expired(sd: dict) -> bool:
+    exp = sd.get("expires_at")
+    return bool(exp) and time.time() >= float(exp)
 
 
 def _um_base(base: str) -> str:
@@ -293,6 +313,10 @@ def _token_for(audience: str) -> Dict[str, str]:
         return {"url": base, "token": raw, "email": cl.get("sub") or _decode_sub(raw) or ""}
 
     # 2) per-session (cached access -> refresh -> legacy)
+    if key is not None and key in _SESSIONS and _session_expired(_SESSIONS[key]):
+        # Session lapsed — forget it so cached creds aren't silently reused; the
+        # caller must log in again.
+        _SESSIONS.pop(key, None)
     if key is not None and key in _SESSIONS:
         sd = _SESSIONS[key]
         cached = _cached_access(sd, audience)
@@ -318,7 +342,8 @@ def _token_for(audience: str) -> Dict[str, str]:
             if ex:
                 if key is not None:
                     sd = _SESSIONS.setdefault(key, {})
-                    sd.update({"refresh": refresh, "email": em, "password": pw, "url": base})
+                    sd.update({"refresh": refresh, "email": em, "password": pw, "url": base,
+                               "expires_at": _session_expiry(refresh)})
                     _store_access(sd, audience, ex[0], ex[1])
                 return {"url": base, "token": ex[0], "email": em}
         # legacy fallback (per-service /api/token)
@@ -330,10 +355,11 @@ def _token_for(audience: str) -> Dict[str, str]:
             return {"url": base, "token": legacy, "email": em}
 
     raise _NotAuthed(
-        "Not authenticated. On the hosted remote, send 'Authorization: Bearer "
-        "<token>' — a refresh token unlocks all services; a service access token "
-        "works for that service. Locally, call brainkb_login(email, password) or "
-        "set BRAINKB_EMAIL / BRAINKB_PASSWORD."
+        "Not authenticated (or your session has expired — sessions don't last "
+        "forever). Log in again: brainkb_login(email, password), or "
+        "brainkb_globus_login() for Globus/ORCID/GitHub. On the hosted remote, send "
+        "'Authorization: Bearer <token>' (a refresh token unlocks all services). "
+        "Single-user/dev may set BRAINKB_EMAIL / BRAINKB_PASSWORD."
     )
 
 
@@ -533,8 +559,9 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
             # Credentials kept in memory for THIS session only, to re-login if the
             # refresh token expires. Never echoed.
             _SESSIONS[key] = {"refresh": refresh, "url": base, "email": email,
-                              "password": password, "access": {}}
-            return f"Logged in as {email} at {base} (SSO; this session)."
+                              "password": password, "access": {},
+                              "expires_at": _session_expiry(refresh)}
+            return f"Logged in as {email} at {base} (SSO; this session, expires when the token does)."
         # Legacy fallback: per-service query_service token.
         legacy = _legacy_login(base, email, password)
         if not legacy:
@@ -543,7 +570,8 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
             return ("Logged in (legacy), but this session could not be identified to cache "
                     "the token; send an Authorization header instead.")
         _SESSIONS[key] = {"legacy_token": legacy, "url": base, "email": email,
-                          "password": password, "access": {}}
+                          "password": password, "access": {},
+                          "expires_at": _session_expiry(legacy)}
         return f"Logged in as {email} at {base} (this session)."
     except Exception as e:
         return f"Login error: {e}"
@@ -596,8 +624,9 @@ def brainkb_finish_login(code: str, base_url: str = "") -> str:
         email = _decode_sub(refresh) or ""
         # OAuth session: no password stored (can't password re-login); the refresh
         # token drives per-service SSO exchange like a normal login.
-        _SESSIONS[key] = {"refresh": refresh, "url": base, "email": email, "access": {}}
-        return f"Logged in as {email or 'your account'} at {base} (via OAuth SSO; this session)."
+        _SESSIONS[key] = {"refresh": refresh, "url": base, "email": email, "access": {},
+                          "expires_at": _session_expiry(refresh)}
+        return f"Logged in as {email or 'your account'} at {base} (via OAuth SSO; this session, expires when the token does)."
     except Exception as e:
         return f"Finish login error: {e}"
 
@@ -613,12 +642,20 @@ def brainkb_logout() -> str:
 
 @mcp.tool()
 def brainkb_whoami() -> Dict[str, Any]:
-    """Report the current caller's auth state (base URL, email, authenticated)."""
+    """Report the current caller's auth state (base URL, email, authenticated, and
+    when the cached session expires)."""
     try:
         ctx = _resolve()
-        return {"base_url": ctx["url"], "email": ctx["email"], "authenticated": True}
-    except _NotAuthed:
-        return {"base_url": _DEFAULT_URL, "email": None, "authenticated": False}
+        out = {"base_url": ctx["url"], "email": ctx["email"], "authenticated": True}
+        key = _session_key()
+        if key is not None and key in _SESSIONS:
+            exp = _SESSIONS[key].get("expires_at")
+            if exp:
+                out["session_expires_in_min"] = max(0, round((float(exp) - time.time()) / 60))
+        return out
+    except _NotAuthed as e:
+        return {"base_url": _DEFAULT_URL, "email": None, "authenticated": False,
+                "hint": "Session may have expired — log in again (brainkb_login / brainkb_globus_login)."}
 
 
 # --------------------------------------------------------------------------- #
