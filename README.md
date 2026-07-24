@@ -31,6 +31,7 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 ### Session
 | Tool | What it does |
 |------|--------------|
+| `brainkb_register(full_name, email, password, base_url?)` | Self-register a new account (no login); creates a profile + default role, starts **inactive** until an admin activates it |
 | `brainkb_login(email, password, base_url?)` | Authenticate; cache JWT for this session |
 | `brainkb_whoami()` / `brainkb_logout()` | Session/auth info / forget this session's token |
 
@@ -47,8 +48,8 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 ### Ingest & jobs
 | Tool | What it does |
 |------|--------------|
-| `brainkb_ingest_text(graph_iri, data)` | Ingest raw RDF text → returns `job_id` |
-| `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files → `job_id` |
+| `brainkb_ingest_text(graph_iri, data)` | Ingest raw RDF text → returns `job_id` (raw text capped, default 10 MB — use files for larger) |
+| `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files (TTL/JSON-LD/…) → `job_id`. Streams large uploads (up to ~5 GB/user); no byte cap, only a file-count cap |
 | `brainkb_list_jobs(limit?)` / `brainkb_job_status(job_id)` | Ingest status |
 | `brainkb_recover_job(job_id)` | Recover a stuck/errored job |
 
@@ -83,6 +84,31 @@ Require an **Admin/SuperAdmin** role and MCP credentials (env auto-login or `bra
 | `brainkb_create_role(name, category?, description?)` | Create a role/group (e.g. `External`) |
 | `brainkb_assign_role(email, role)` / `brainkb_remove_role(email, role)` | Assign/remove a role by email |
 | `brainkb_activate_user(email)` / `brainkb_deactivate_user(email)` | Activate/deactivate an account |
+
+## Rate limiting & payload guards
+
+The server applies an in-process, **per-caller** fixed-window rate limit (keyed by
+source IP — `X-Forwarded-For` / `X-Real-IP` / socket peer) plus payload guards, as
+a first line of defence against abuse / brute-force / floods on the hosted remote.
+It is **per-process** (each worker has its own counters) and is **not** a
+substitute for an edge proxy / WAF / API gateway for real DDoS. `stdio` (local) is
+exempt. Over-limit calls return HTTP `429`.
+
+| Env | Default | Limits |
+|-----|---------|--------|
+| `MCP_RATELIMIT_ENABLED` | `true` | Master switch (`false` to disable) |
+| `MCP_RATELIMIT_WINDOW_SEC` | `60` | Window length (seconds) |
+| `MCP_RATELIMIT_AUTH_PER_MIN` | `8` | `brainkb_register` / `brainkb_login` (brute-force) |
+| `MCP_RATELIMIT_WRITE_PER_MIN` | `40` | mutations / ingest |
+| `MCP_RATELIMIT_READ_PER_MIN` | `120` | reads |
+| `MCP_RATELIMIT_ADMIN_PER_MIN` | `30` | usermanagement admin calls |
+| `MCP_MAX_INGEST_BYTES` | `10000000` | max **raw-text** ingest size (0 = unlimited); file ingest is **not** capped |
+| `MCP_MAX_INGEST_FILES` | `50` | max files per `brainkb_ingest_files` call |
+
+Large-file ingest (TTL/JSON-LD up to ~5 GB per user) streams from disk with
+read/write timeouts disabled, so big uploads are not aborted. The **backend** must
+also allow it — ensure the query_service reverse proxy / load balancer permits
+large request bodies and a long enough idle timeout.
 
 ## Install
 

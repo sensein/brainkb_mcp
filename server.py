@@ -22,7 +22,9 @@ or returned to the model.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
@@ -42,6 +44,11 @@ mcp = FastMCP(
 
 _DEFAULT_URL = os.getenv("BRAINKB_URL", "http://localhost:8010").rstrip("/")
 _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
+# File ingest streams potentially very large uploads (TTL/JSON-LD up to ~5GB per
+# user). A fixed read/write timeout would abort a legitimate large upload, so we
+# disable read/write timeouts here and keep only a connect bound. Files stream
+# from disk (httpx multipart), so this does not buffer the whole file in memory.
+_UPLOAD_TIMEOUT = httpx.Timeout(None, connect=30.0)
 
 # Per-session login store (fallback for local/stdio use only), keyed by the MCP
 # session's identity. The hosted multi-user remote does NOT rely on this — each
@@ -82,6 +89,95 @@ def _request_headers() -> Dict[str, str]:
     except Exception:
         pass
     return {}
+
+
+# --------------------------------------------------------------------------- #
+# Rate limiting / abuse protection
+# --------------------------------------------------------------------------- #
+# In-process, per-caller fixed-window limiter. This is a first line of defence
+# against abuse / brute-force / accidental floods on the hosted remote — it is
+# NOT a substitute for an edge proxy / WAF / API gateway for real DDoS, and it is
+# per-process (each worker keeps its own counters). Callers are keyed by client
+# IP (X-Forwarded-For / X-Real-IP / socket peer) so header-authenticated users
+# behind the same proxy are still separated by source IP. stdio (local) is exempt.
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_RL_ENABLED = os.getenv("MCP_RATELIMIT_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+_RL_WINDOW = max(1, _int_env("MCP_RATELIMIT_WINDOW_SEC", 60))
+_RL_READ = _int_env("MCP_RATELIMIT_READ_PER_MIN", 120)     # GET-style reads
+_RL_WRITE = _int_env("MCP_RATELIMIT_WRITE_PER_MIN", 40)    # mutations / ingest
+_RL_ADMIN = _int_env("MCP_RATELIMIT_ADMIN_PER_MIN", 30)    # usermanagement admin
+_RL_AUTH = _int_env("MCP_RATELIMIT_AUTH_PER_MIN", 8)       # register / login (brute-force)
+
+# Payload guards (0 disables). Bound resource use per ingest call.
+_MAX_INGEST_BYTES = _int_env("MCP_MAX_INGEST_BYTES", 10_000_000)  # per raw-text ingest
+_MAX_INGEST_FILES = _int_env("MCP_MAX_INGEST_FILES", 50)          # per file-ingest call
+
+_RL_LOCK = threading.Lock()
+_RL_BUCKETS: Dict[Tuple[str, str], list] = {}  # (client_id, bucket) -> [window, count]
+
+
+def _client_id() -> str:
+    """Identify the caller for rate-limiting. Prefer source IP so many users
+    behind one reverse proxy are still throttled per origin; fall back to the MCP
+    session; 'local' for stdio (exempt)."""
+    hdrs = _request_headers()
+    xff = hdrs.get("x-forwarded-for", "")
+    if xff:
+        return "ip:" + xff.split(",")[0].strip()
+    xri = hdrs.get("x-real-ip", "")
+    if xri:
+        return "ip:" + xri.strip()
+    try:
+        req = getattr(mcp.get_context().request_context, "request", None)
+        client = getattr(req, "client", None)
+        if client and getattr(client, "host", None):
+            return "ip:" + client.host
+    except Exception:
+        pass
+    sk = _session_key()
+    return f"sess:{sk}" if sk is not None else "local"
+
+
+def _rate_ok(bucket: str, limit: int) -> bool:
+    """True if this caller may proceed in `bucket`; False if the limit is hit."""
+    if not _RL_ENABLED or limit <= 0:
+        return True
+    cid = _client_id()
+    if cid == "local":
+        return True  # stdio single-user — nothing to throttle
+    now = time.time()
+    win = int(now // _RL_WINDOW)
+    key = (cid, bucket)
+    with _RL_LOCK:
+        slot = _RL_BUCKETS.get(key)
+        if slot is None or slot[0] != win:
+            _RL_BUCKETS[key] = [win, 1]
+            # Bound memory: drop stale windows if the map grows large.
+            if len(_RL_BUCKETS) > 20000:
+                for k, v in list(_RL_BUCKETS.items()):
+                    if v[0] != win:
+                        _RL_BUCKETS.pop(k, None)
+            return True
+        if slot[1] >= limit:
+            return False
+        slot[1] += 1
+        return True
+
+
+def _rl_error(bucket: str, limit: int) -> Dict[str, Any]:
+    return {
+        "error": True,
+        "status_code": 429,
+        "detail": (f"Rate limit exceeded for '{bucket}' ({limit} requests per "
+                   f"{_RL_WINDOW}s). Slow down and retry shortly."),
+    }
 
 
 class _NotAuthed(RuntimeError):
@@ -156,6 +252,8 @@ def _result(resp: httpx.Response) -> Any:
 
 
 def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    if not _rate_ok("read", _RL_READ):
+        return _rl_error("read", _RL_READ)
     try:
         ctx = _resolve()
         with httpx.Client(timeout=_TIMEOUT) as c:
@@ -170,13 +268,16 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
 
 def _post(path: str, params: Optional[Dict[str, Any]] = None,
           json: Any = None, content: Optional[bytes] = None,
-          ctype: Optional[str] = None, files: Any = None) -> Any:
+          ctype: Optional[str] = None, files: Any = None,
+          timeout: Optional[httpx.Timeout] = None) -> Any:
+    if not _rate_ok("write", _RL_WRITE):
+        return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
         headers = {"Authorization": f"Bearer {ctx['token']}"}
         if ctype:
             headers["Content-Type"] = ctype
-        with httpx.Client(timeout=_TIMEOUT) as c:
+        with httpx.Client(timeout=timeout or _TIMEOUT) as c:
             resp = c.post(f"{ctx['url']}{path}", params=params or {}, headers=headers,
                           json=json, content=content, files=files)
         return _result(resp)
@@ -187,6 +288,8 @@ def _post(path: str, params: Optional[Dict[str, Any]] = None,
 
 
 def _patch(path: str, json: Any = None) -> Any:
+    if not _rate_ok("write", _RL_WRITE):
+        return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
         with httpx.Client(timeout=_TIMEOUT) as c:
@@ -200,6 +303,8 @@ def _patch(path: str, json: Any = None) -> Any:
 
 
 def _delete(path: str) -> Any:
+    if not _rate_ok("write", _RL_WRITE):
+        return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
         with httpx.Client(timeout=_TIMEOUT) as c:
@@ -245,6 +350,8 @@ def _um_login() -> str:
 
 
 def _um(method: str, path: str, json: Any = None, params: Any = None, _retry: bool = True) -> Any:
+    if _retry and not _rate_ok("admin", _RL_ADMIN):
+        return _rl_error("admin", _RL_ADMIN)
     try:
         email, _ = _creds()
         tok = _UM_TOKENS.get(email) or _um_login()
@@ -275,6 +382,42 @@ def _um_profile_id(email: str) -> Optional[int]:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
+def brainkb_register(full_name: str, email: str, password: str, base_url: str = "") -> str:
+    """Self-register a new BrainKB account (no login required).
+
+    Creates the credential plus a canonical user profile with a default role, so
+    the new user is a first-class identity (not a role-less orphan). The account
+    starts INACTIVE — an Admin/SuperAdmin must activate it (brainkb_activate_user)
+    before it can log in. The password is never echoed."""
+    if not _rate_ok("auth", _RL_AUTH):
+        return _rl_error("auth", _RL_AUTH)["detail"]
+    base = (base_url or _DEFAULT_URL).rstrip("/")
+    try:
+        r = httpx.post(
+            f"{base}/api/register",
+            json={"full_name": full_name, "email": email, "password": password},
+            timeout=30,
+        )
+        r.raise_for_status()
+        detail = ""
+        try:
+            detail = r.json().get("detail", "")
+        except Exception:
+            pass
+        return detail or (
+            f"Registered {email}. An admin must activate the account before login.")
+    except httpx.HTTPStatusError as e:
+        msg = ""
+        try:
+            msg = e.response.json().get("detail", "")
+        except Exception:
+            pass
+        return f"Registration failed (HTTP {e.response.status_code})" + (f": {msg}" if msg else ".")
+    except Exception as e:
+        return f"Registration error: {e}"
+
+
+@mcp.tool()
 def brainkb_login(email: str, password: str, base_url: str = "") -> str:
     """Authenticate to BrainKB with the user's credentials and cache the JWT for
     THIS session only (isolated per caller). The password/token are never echoed.
@@ -282,6 +425,8 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
     On the hosted multi-user remote you can skip this and instead have your client
     send an 'Authorization: Bearer <BrainKB token>' header — that is the preferred,
     stateless way to authenticate per user."""
+    if not _rate_ok("auth", _RL_AUTH):
+        return _rl_error("auth", _RL_AUTH)["detail"]
     key = _session_key()
     base = (base_url or _DEFAULT_URL).rstrip("/")
     try:
@@ -374,9 +519,14 @@ def brainkb_ingest_text(named_graph_iri: str, data: str) -> Any:
     named graph. Returns a job_id; ingestion runs in the background — poll with
     brainkb_job_status. The graph must be registered (see brainkb_add_space_graph)
     and the caller must have write access to its space."""
+    payload = data.encode("utf-8")
+    if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
+        return {"error": True, "status_code": 413,
+                "detail": (f"Payload too large ({len(payload)} bytes > "
+                           f"{_MAX_INGEST_BYTES}). Split it or use file ingest.")}
     return _post("/api/insert/raw/knowledge-graph-triples",
                  params={"user_id": _me(), "named_graph_iri": named_graph_iri},
-                 content=data.encode("utf-8"), ctype="text/plain")
+                 content=payload, ctype="text/plain")
 
 
 @mcp.tool()
@@ -384,6 +534,9 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
                          max_concurrency: int = 8) -> Any:
     """Ingest local RDF files (ttl/nt/nq/rdf/owl/jsonld/json) into a named graph.
     Returns a job_id; runs in the background — poll with brainkb_job_status."""
+    if _MAX_INGEST_FILES > 0 and len(file_paths) > _MAX_INGEST_FILES:
+        return {"error": True, "status_code": 413,
+                "detail": f"Too many files ({len(file_paths)} > {_MAX_INGEST_FILES} per call)."}
     handles = []
     try:
         files = []
@@ -391,10 +544,13 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
             fh = open(p, "rb")
             handles.append(fh)
             files.append(("files", (os.path.basename(p), fh, "application/octet-stream")))
+        # No byte cap here (only a file-count cap): TTL/JSON-LD uploads may be
+        # large (up to ~5GB per user). Use the long upload timeout so big
+        # streams aren't aborted mid-transfer.
         return _post("/api/insert/files/knowledge-graph-triples",
                      params={"user_id": _me(), "named_graph_iri": named_graph_iri,
                              "max_concurrency": max_concurrency},
-                     files=files)
+                     files=files, timeout=_UPLOAD_TIMEOUT)
     except FileNotFoundError as e:
         return {"error": True, "detail": str(e)}
     finally:
