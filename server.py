@@ -12,12 +12,16 @@ Transport: stdio (default). Run with:  python server.py
 
 Configuration (env, all optional):
   BRAINKB_URL       Base URL of the query_service (default http://localhost:8010)
-  BRAINKB_TOKEN     A Personal Access Token (brainkb_pat_...) — the recommended,
-                    browser-free way to authenticate. Mint one with
-                    brainkb_create_token() after logging in once, then paste it
-                    here; no login/browser is needed afterward until it expires.
-  BRAINKB_EMAIL     Auto-login email (else call brainkb_login)
-  BRAINKB_PASSWORD  Auto-login password
+  BRAINKB_TOKEN     A Personal Access Token (brainkb_pat_...) — the recommended
+                    way to authenticate. Mint one with brainkb_create_token()
+                    after logging in once, then paste it here; no login/browser is
+                    needed afterward until it expires. Carries the caller's
+                    identity per call, so it can't be shadowed by a stale fallback.
+
+There is NO email/password auto-login: a baked-in credential could silently act
+as a fallback identity and mis-attribute another user's actions, so it was
+removed. Authenticate with BRAINKB_TOKEN, brainkb_login / brainkb_globus_login,
+brainkb_use_token, or a per-caller 'Authorization: Bearer' header.
 
 Credentials/token live only in this process's memory; the token is never logged
 or returned to the model.
@@ -321,12 +325,17 @@ def _token_for(audience: str) -> Dict[str, str]:
     `audience` (query_service | usermanagement). Multi-user safe.
 
     Precedence:
-      1. Caller's `Authorization: Bearer <token>` header. A REFRESH token is
-         exchanged for the requested audience (unlocks every service from one
-         header); any other token is used as-is (works at its own service).
-         `X-BrainKB-Base-URL` optionally overrides the backend URL.
-      2. Per-session credentials/refresh set by `brainkb_login`.
-      3. Env `BRAINKB_EMAIL`/`BRAINKB_PASSWORD` auto-login (single-user/dev).
+      1. Caller's `Authorization: Bearer <token>` header (a PAT or REFRESH token is
+         exchanged for the requested audience — unlocks every service from one
+         header; any other token is used as-is). `X-BrainKB-Base-URL` optionally
+         overrides the backend URL.
+      2. Env `BRAINKB_TOKEN` Personal Access Token.
+      3. Per-session login set by `brainkb_login` / `brainkb_finish_login` /
+         `brainkb_use_token` (with re-login from that session's own stored
+         credentials if its refresh token has expired).
+
+    There is deliberately NO env email/password auto-login: a baked-in credential
+    could silently shadow a real login and mis-attribute actions to the wrong user.
     """
     hdrs = _request_headers()
     base = hdrs.get("x-brainkb-base-url", _DEFAULT_URL).rstrip("/")
@@ -390,11 +399,16 @@ def _token_for(audience: str) -> Dict[str, str]:
                 _store_access(sd, audience, ex[0], ex[1])
             return {"url": base, "token": ex[0], "email": email}
 
-    # 4) env auto-login (or session-stored creds, e.g. after refresh expiry)
-    em, pw = os.getenv("BRAINKB_EMAIL"), os.getenv("BRAINKB_PASSWORD")
-    if not (em and pw) and key is not None and key in _SESSIONS:
+    # 4) session credential re-login — ONLY continues an explicit password
+    #    brainkb_login within THIS session (e.g. after its refresh token expired).
+    #    There is NO env auto-login: a baked-in BRAINKB_EMAIL/BRAINKB_PASSWORD must
+    #    never silently act as a fallback identity (that caused calls to run as the
+    #    wrong user). Use BRAINKB_TOKEN, brainkb_globus_login, brainkb_use_token,
+    #    or an Authorization header instead.
+    em = pw = None
+    if key is not None and key in _SESSIONS:
         sd = _SESSIONS[key]
-        em, pw = (sd.get("email") or em), (sd.get("password") or pw)
+        em, pw = sd.get("email"), sd.get("password")
     if em and pw:
         refresh = _sso_login(um, em, pw)
         if refresh:
