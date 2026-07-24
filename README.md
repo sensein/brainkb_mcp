@@ -153,14 +153,20 @@ Auth is resolved **per call**, so the hosted remote can serve many users without
 one caller's credentials leaking to another. Resolution order:
 
 1. **`Authorization: Bearer <token>` header** on the inbound request — the
-   preferred, **stateless** way for the multi-user remote. A **refresh token**
-   here unlocks every service (the MCP exchanges it per service); a single
-   **service access token** works for that service. An optional
-   `X-BrainKB-Base-URL` header overrides the backend URL.
-2. **Per-session login** — `brainkb_login(email, password)` (or
-   `brainkb_globus_login` → `brainkb_finish_login`) caches the refresh token for
-   *that MCP session only*.
-3. **Env auto-login** — `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` (single-user/dev).
+   preferred, **stateless** way for the multi-user remote. A **PAT** or a
+   **refresh token** here unlocks every service (the MCP exchanges it per
+   service); a single **service access token** works for that service. An
+   optional `X-BrainKB-Base-URL` header overrides the backend URL.
+2. **`BRAINKB_TOKEN` env — a Personal Access Token** (`brainkb_pat_…`). The
+   recommended way to stay logged in across tasks/sessions: it authenticates
+   per-call, so it survives when an in-session login would not.
+3. **Per-session login** — `brainkb_login(email, password)` (or
+   `brainkb_globus_login` → `brainkb_finish_login`, or `brainkb_use_token`) caches
+   the credential for *that MCP session only*.
+
+There is **no email/password auto-login** — a baked-in `BRAINKB_EMAIL`/
+`BRAINKB_PASSWORD` was removed because it could silently shadow a real login and
+mis-attribute actions. Use a PAT, an explicit login, or an `Authorization` header.
 
 **Onboarding = first login (no self-registration).** New users are created
 automatically the first time they sign in with **Globus/ORCID/GitHub**
@@ -168,11 +174,26 @@ automatically the first time they sign in with **Globus/ORCID/GitHub**
 step (the backend `/api/register` is disabled). Password login (`brainkb_login`)
 works for accounts that already exist.
 
-**Sessions expire — logins are not forever.** A cached session lasts until its
-refresh token expires (`USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN`, default 12h),
-hard-capped by `MCP_SESSION_TTL_MIN` (default 720). When it lapses the MCP forgets
-the cached credentials and the next call returns "not authenticated — log in
-again"; `brainkb_whoami` reports `session_expires_in_min`.
+### Expiration — what lasts how long
+
+| Credential | Lifetime | Notes |
+|---|---|---|
+| **Personal Access Token (PAT)** — `BRAINKB_TOKEN` | **3 days, SLIDING** (default) | Each use pushes expiry to *now + `USERMANAGEMENT_PAT_DEFAULT_DAYS`* (default 3); stays alive while you keep using it, expires after that many **idle** days. Hard ceiling = *created + `USERMANAGEMENT_PAT_MAX_DAYS`* (default 365). Revocable instantly (`brainkb_revoke_token`). Sliding is toggled by `USERMANAGEMENT_PAT_SLIDING`. |
+| **Per-service access token** (internal, from exchange) | `USERMANAGEMENT_ACCESS_TOKEN_TTL_MIN` (default 15 min) | Short-lived; the MCP re-exchanges automatically. You never handle it. |
+| **Refresh token** (in-session login) | `USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN` (default 12h), capped by MCP `MCP_SESSION_TTL_MIN` (default 720 min) | Cached for that MCP session only; does **not** persist across tasks on the hosted remote — use a PAT for that. |
+| **OAuth paste-code** (`brainkb_globus_login`) | ~10 min, **single-use** | Only a handle swapped once for a refresh token; high-entropy (`USERMANAGEMENT_CLI_CODE_LEN`, default 20 chars ≈ 98 bits). |
+
+**To stay logged in across tasks** (no re-prompt): log in once, run
+`brainkb_create_token`, and set the returned `brainkb_pat_…` as `BRAINKB_TOKEN`
+in your MCP config. Thanks to sliding expiry it keeps working for 3 days of
+activity and self-extends; leave it unused 3 days and it expires — mint a new one.
+
+**In-session logins expire — and don't cross sessions.** A cached in-session
+login lasts until its refresh token expires (`USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN`,
+default 12h), hard-capped by `MCP_SESSION_TTL_MIN` (default 720). On the hosted
+`streamable-http` transport a *new task/conversation* is a new session, so an
+in-session login won't carry over — that's expected; use a PAT. `brainkb_whoami`
+reports `session_expires_in_min`.
 
 There is **no shared/global token**. The `user_id` sent to the backend is derived
 from the caller's own token (`sub` claim), and the backend independently verifies
