@@ -811,7 +811,15 @@ def brainkb_use_token(token: str, base_url: str = "") -> str:
 
 @mcp.tool()
 def brainkb_list_spaces() -> Any:
-    """List spaces the user can see (their own/member spaces + public ones)."""
+    """List spaces the user can see (their own/member spaces + public ones), each
+    annotated with THIS caller's permission so you know what they may do:
+      - your_role: 'owner' | 'editor' | 'viewer' | null (their space membership)
+      - is_owner:  they own the space
+      - access:    'owner' | 'member' | 'public' (how it's available to them)
+      - can_write: their space role permits ingest (owner/editor) — a real ingest
+                   also needs the 'ingest' capability + any per-space access rules.
+    Use this to tell the user which spaces they can read vs. write vs. only see as
+    public."""
     return _get("/api/spaces")
 
 
@@ -819,7 +827,9 @@ def brainkb_list_spaces() -> Any:
 def brainkb_create_space(slug: str, name: str, visibility: str = "private",
                          description: str = "", space_type: str = "individual") -> Any:
     """Create a workspace/space. The caller becomes owner.
-    slug: lowercase/hyphen id; visibility: 'private' or 'public';
+    slug: lowercase/hyphen id, **globally unique** — if it's already taken the call
+    returns 409 (pick another slug; slugs are never reused/deleted).
+    visibility: 'private' or 'public';
     description: short human description (recommended — surfaces in the registry);
     space_type: 'individual' (a personal space — any write-capable role) or 'team'
     (a shared space — only Admin/SuperAdmin, or a user granted create_team_space)."""
@@ -844,7 +854,10 @@ def brainkb_add_space_member(slug: str, member_email: str, role: str = "viewer")
 @mcp.tool()
 def brainkb_add_space_graph(slug: str, named_graph_iri: str, description: str = "") -> Any:
     """Register a named graph and bind it to a space, so ingest/read on that graph
-    are governed by the space's membership and visibility. Owner/editor only."""
+    are governed by the space's membership and visibility. Owner/editor only.
+    The named_graph_iri is **globally unique** — one graph belongs to exactly one
+    space. If it's already registered (to any space) the call returns 409; graph
+    bindings are permanent (no unregister/delete)."""
     return _post(f"/api/spaces/{quote(slug)}/graphs",
                  json={"named_graph_url": named_graph_iri, "description": description})
 
