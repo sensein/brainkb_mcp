@@ -417,11 +417,13 @@ def _token_for(audience: str) -> Dict[str, str]:
     raise _NotAuthed(
         "Not authenticated (or your session has expired — sessions don't last "
         "forever). Easiest: set BRAINKB_TOKEN to a Personal Access Token "
-        "(brainkb_pat_...) in your config — mint one with brainkb_create_token() "
-        "after logging in once, and no browser is needed afterward. Or log in now: "
-        "brainkb_login(email, password), brainkb_globus_login() for Globus/ORCID/"
-        "GitHub, or brainkb_use_token(pat). On the hosted remote, send "
-        "'Authorization: Bearer <token>' (a PAT or refresh token unlocks all services)."
+        "(brainkb_pat_...) in your config, or pass one with brainkb_use_token(pat) "
+        "— no browser needed. To sign in as your account, use "
+        "brainkb_globus_login() (Globus/ORCID/GitHub) — it returns a URL to open, "
+        "then brainkb_finish_login(code). Do NOT expect a password prompt: password "
+        "login (brainkb_login) is legacy and only for explicit password accounts. "
+        "On the hosted remote, send 'Authorization: Bearer <token>' (a PAT or "
+        "refresh token unlocks all services)."
     )
 
 
