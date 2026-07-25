@@ -17,9 +17,19 @@ services:
       MCP_TRANSPORT: streamable-http
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8080"
-      # On macOS/Windows Docker Desktop, host.docker.internal = the host machine.
-      BRAINKB_URL: http://host.docker.internal:8010
-    # Optional local-only credentials for auto-login (file may be absent).
+      # The BrainKB stack runs on the SAME host (EC2), publishing :8010/:8004.
+      # A container's own `localhost` isn't the host, so we reach them via
+      # host.docker.internal (mapped below for Linux). Overridable from .env.
+      BRAINKB_URL: ${BRAINKB_URL:-http://host.docker.internal:8010}
+      USERMANAGEMENT_URL: ${USERMANAGEMENT_URL:-http://host.docker.internal:8004}
+    # Make host.docker.internal resolve to the host on Linux/EC2 (it's built in on
+    # macOS/Windows Docker Desktop). This is what lets the MCP reach the
+    # co-located query_service/usermanagement without host networking, keeping
+    # :8080 cleanly published for the mcp.brainkb.org reverse proxy.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Config only (BRAINKB_URL / optional BRAINKB_TOKEN). No auto-login creds —
+    # authenticate with a PAT or a per-caller Authorization header.
     env_file:
       - path: .env
         required: false

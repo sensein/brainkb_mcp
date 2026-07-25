@@ -25,28 +25,97 @@ later (set `MCP_TRANSPORT=streamable-http` to serve it).
 
 ## Tools
 
+Authorization is enforced **server-side** (roles → capabilities → space membership
+→ per-space rules); these tools just invoke it and surface `403`s.
+
+### Session
 | Tool | What it does |
 |------|--------------|
-| `brainkb_login(email, password, base_url?)` | Authenticate; cache JWT for this session |
+| `brainkb_login(email, password, base_url?)` | Password login; caches the session token |
+| `brainkb_globus_login(provider?)` | Start OAuth (Globus/ORCID/GitHub) login → returns a URL to open; browser shows a one-time code |
+| `brainkb_finish_login(code)` | Complete OAuth login by pasting the code the browser showed |
 | `brainkb_whoami()` / `brainkb_logout()` | Session/auth info / forget this session's token |
+
+### Spaces
+| Tool | What it does |
+|------|--------------|
 | `brainkb_list_spaces()` | List spaces you can see (yours + public) |
-| `brainkb_create_space(slug, name, visibility, description?)` | Create a workspace |
-| `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner) |
-| `brainkb_add_space_member(slug, email, role)` | Manage members (owner) |
+| `brainkb_create_space(slug, name, visibility, description?, space_type?)` | Create a workspace — `space_type` `individual` (write-capable role) or `team` (Admin/granted) |
+| `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager) |
+| `brainkb_add_space_member(slug, email, role)` | Manage members (owner/manager) |
 | `brainkb_add_space_graph(slug, graph_iri, description?)` | Register + bind a graph to a space |
-| `brainkb_ingest_text(graph_iri, data)` | Ingest raw RDF text → returns `job_id` |
-| `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files → `job_id` |
+| `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
+
+### Ingest & jobs
+| Tool | What it does |
+|------|--------------|
+| `brainkb_ingest_text(graph_iri, data)` | Ingest raw RDF text → returns `job_id` (raw text capped, default 10 MB — use files for larger) |
+| `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files (TTL/JSON-LD/…) → `job_id`. Streams large uploads (up to ~5 GB/user); no byte cap, only a file-count cap |
 | `brainkb_list_jobs(limit?)` / `brainkb_job_status(job_id)` | Ingest status |
 | `brainkb_recover_job(job_id)` | Recover a stuck/errored job |
+
+### Read / search / provenance
+| Tool | What it does |
+|------|--------------|
 | `brainkb_search(q, space?, limit?, offset?)` | Access-filtered full-text search |
-| `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
 | `brainkb_list_registered_graphs()` | List visible registered graphs |
-| `brainkb_sparql(query)` | Arbitrary SPARQL (admin scope) |
+| `brainkb_sparql(query)` | Arbitrary SPARQL (**admin** role) |
 | `brainkb_provenance_job(job_id)` | PROV-O bundle for a job |
 | `brainkb_provenance_graph(graph_iri)` | PROV-O history for a graph |
 | `brainkb_delta(job_id)` | Exact triples a job added |
 | `brainkb_delta_history(graph_iri)` | A graph's change history |
 | `brainkb_delta_compare(job_a, job_b)` | Diff two jobs' deltas |
+
+### Authorization / RBAC (query_service)
+| Tool | What it does |
+|------|--------------|
+| `brainkb_list_capabilities()` | (Admin) Catalog of KG capabilities — all / grantable / admin-only + meanings |
+| `brainkb_capabilities(member)` | (Admin) A user's roles / effective capabilities / grants |
+| `brainkb_grant_capability(member, capability)` / `brainkb_revoke_capability(...)` | (Admin) Delegate/revoke a capability to an **individual** |
+| `brainkb_role_capabilities(role)` | (Admin) Capabilities granted to a role/group |
+| `brainkb_grant_role_capability(role, capability)` / `brainkb_revoke_role_capability(...)` | (Admin) Grant/revoke a capability to a whole **group/role** (e.g. `uk_collaborator`) |
+| `brainkb_list_access_rules(slug)` | List a space's fine-grained access rules |
+| `brainkb_add_access_rule(slug, action, subject_type, subject_value)` | Add a per-space rule (read/write/manage × global_role/member/space_role) — a write rule GRANTS a group ingest into that space |
+| `brainkb_remove_access_rule(slug, rule_id)` | Remove a per-space access rule |
+
+### Admin user management (usermanagement service, `:8004`)
+Require an **Admin/SuperAdmin** role and MCP credentials (env auto-login or `brainkb_login`).
+Assigning/removing the `Admin` role and banning an Admin are **SuperAdmin-only**.
+| Tool | What it does |
+|------|--------------|
+| `brainkb_list_users(q?, role?, limit?)` | List users/profiles |
+| `brainkb_available_roles()` | List roles/groups |
+| `brainkb_create_role(name, category?, description?)` | Create a role/group/category (e.g. `uk_collaborator`) |
+| `brainkb_assign_role(email, role)` / `brainkb_remove_role(email, role)` | Assign/remove a role by email (Admin role = SuperAdmin-only) |
+| `brainkb_list_permissions()` | List usermanagement permissions (resource/action) |
+| `brainkb_create_permission(name, resource, action, description?)` | Add a new permission |
+| `brainkb_activate_user(email)` / `brainkb_deactivate_user(email)` | Activate/deactivate login access |
+| `brainkb_ban_user(email, reason)` / `brainkb_unban_user(email)` | Ban/unban — the removal mechanism (**no hard delete**; reversible) |
+
+## Rate limiting & payload guards
+
+The server applies an in-process, **per-caller** fixed-window rate limit (keyed by
+source IP — `X-Forwarded-For` / `X-Real-IP` / socket peer) plus payload guards, as
+a first line of defence against abuse / brute-force / floods on the hosted remote.
+It is **per-process** (each worker has its own counters) and is **not** a
+substitute for an edge proxy / WAF / API gateway for real DDoS. `stdio` (local) is
+exempt. Over-limit calls return HTTP `429`.
+
+| Env | Default | Limits |
+|-----|---------|--------|
+| `MCP_RATELIMIT_ENABLED` | `true` | Master switch (`false` to disable) |
+| `MCP_RATELIMIT_WINDOW_SEC` | `60` | Window length (seconds) |
+| `MCP_RATELIMIT_AUTH_PER_MIN` | `8` | `brainkb_login` / `brainkb_globus_login` (brute-force) |
+| `MCP_RATELIMIT_WRITE_PER_MIN` | `40` | mutations / ingest |
+| `MCP_RATELIMIT_READ_PER_MIN` | `120` | reads |
+| `MCP_RATELIMIT_ADMIN_PER_MIN` | `30` | usermanagement admin calls |
+| `MCP_MAX_INGEST_BYTES` | `10000000` | max **raw-text** ingest size (0 = unlimited); file ingest is **not** capped |
+| `MCP_MAX_INGEST_FILES` | `50` | max files per `brainkb_ingest_files` call |
+
+Large-file ingest (TTL/JSON-LD up to ~5 GB per user) streams from disk with
+read/write timeouts disabled, so big uploads are not aborted. The **backend** must
+also allow it — ensure the query_service reverse proxy / load balancer permits
+large request bodies and a long enough idle timeout.
 
 ## Install
 
@@ -70,18 +139,61 @@ MCP_TRANSPORT=streamable-http MCP_HOST=0.0.0.0 MCP_PORT=8080 python server.py
 # front with TLS at https://mcp.brainkb.org/mcp
 ```
 
-## Authentication (multi-user safe)
+## Authentication (multi-user safe, single sign-on)
+
+BrainKB uses **single sign-on**: one login mints a short-lived **refresh token**,
+which is exchanged on demand for a narrow, per-service **access token**
+(`aud=query_service`, `aud=usermanagement`, …). A token minted for one service
+can't be replayed against another. The MCP does this exchange for you — a single
+`brainkb_login` now covers both knowledge-graph and admin (usermanagement) tools,
+no second login. If the backend has no SSO, it falls back to legacy per-service
+`/api/token` automatically.
 
 Auth is resolved **per call**, so the hosted remote can serve many users without
 one caller's credentials leaking to another. Resolution order:
 
-1. **`Authorization: Bearer <BrainKB JWT>` header** on the inbound request — the
-   preferred, **stateless** way for the multi-user remote. Each user's client
-   attaches their own token; the server just forwards it to the backend. An
+1. **`Authorization: Bearer <token>` header** on the inbound request — the
+   preferred, **stateless** way for the multi-user remote. A **PAT** or a
+   **refresh token** here unlocks every service (the MCP exchanges it per
+   service); a single **service access token** works for that service. An
    optional `X-BrainKB-Base-URL` header overrides the backend URL.
-2. **Per-session login** — `brainkb_login(email, password)` caches a token scoped
-   to *that MCP session only* (convenient for local/stdio use).
-3. **Env auto-login** — `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` (single-user/dev).
+2. **`BRAINKB_TOKEN` env — a Personal Access Token** (`brainkb_pat_…`). The
+   recommended way to stay logged in across tasks/sessions: it authenticates
+   per-call, so it survives when an in-session login would not.
+3. **Per-session login** — `brainkb_login(email, password)` (or
+   `brainkb_globus_login` → `brainkb_finish_login`, or `brainkb_use_token`) caches
+   the credential for *that MCP session only*.
+
+There is **no email/password auto-login** — a baked-in `BRAINKB_EMAIL`/
+`BRAINKB_PASSWORD` was removed because it could silently shadow a real login and
+mis-attribute actions. Use a PAT, an explicit login, or an `Authorization` header.
+
+**Onboarding = first login (no self-registration).** New users are created
+automatically the first time they sign in with **Globus/ORCID/GitHub**
+(`brainkb_globus_login` → `brainkb_finish_login`); there is no separate register
+step (the backend `/api/register` is disabled). Password login (`brainkb_login`)
+works for accounts that already exist.
+
+### Expiration — what lasts how long
+
+| Credential | Lifetime | Notes |
+|---|---|---|
+| **Personal Access Token (PAT)** — `BRAINKB_TOKEN` | **3 days, SLIDING** (default) | Each use pushes expiry to *now + `USERMANAGEMENT_PAT_DEFAULT_DAYS`* (default 3); stays alive while you keep using it, expires after that many **idle** days. Hard ceiling = *created + `USERMANAGEMENT_PAT_MAX_DAYS`* (default 365). Revocable instantly (`brainkb_revoke_token`). Sliding is toggled by `USERMANAGEMENT_PAT_SLIDING`. |
+| **Per-service access token** (internal, from exchange) | `USERMANAGEMENT_ACCESS_TOKEN_TTL_MIN` (default 15 min) | Short-lived; the MCP re-exchanges automatically. You never handle it. |
+| **Refresh token** (in-session login) | `USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN` (default 12h), capped by MCP `MCP_SESSION_TTL_MIN` (default 720 min) | Cached for that MCP session only; does **not** persist across tasks on the hosted remote — use a PAT for that. |
+| **OAuth paste-code** (`brainkb_globus_login`) | ~10 min, **single-use** | Only a handle swapped once for a refresh token; high-entropy (`USERMANAGEMENT_CLI_CODE_LEN`, default 20 chars ≈ 98 bits). |
+
+**To stay logged in across tasks** (no re-prompt): log in once, run
+`brainkb_create_token`, and set the returned `brainkb_pat_…` as `BRAINKB_TOKEN`
+in your MCP config. Thanks to sliding expiry it keeps working for 3 days of
+activity and self-extends; leave it unused 3 days and it expires — mint a new one.
+
+**In-session logins expire — and don't cross sessions.** A cached in-session
+login lasts until its refresh token expires (`USERMANAGEMENT_REFRESH_TOKEN_TTL_MIN`,
+default 12h), hard-capped by `MCP_SESSION_TTL_MIN` (default 720). On the hosted
+`streamable-http` transport a *new task/conversation* is a new session, so an
+in-session login won't carry over — that's expected; use a PAT. `brainkb_whoami`
+reports `session_expires_in_min`.
 
 There is **no shared/global token**. The `user_id` sent to the backend is derived
 from the caller's own token (`sub` claim), and the backend independently verifies
