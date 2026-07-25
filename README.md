@@ -79,7 +79,7 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_remove_access_rule(slug, rule_id)` | Remove a per-space access rule |
 
 ### Admin user management (usermanagement service, `:8004`)
-Require an **Admin/SuperAdmin** role and MCP credentials (env auto-login or `brainkb_login`).
+Require an **Admin/SuperAdmin** role and an authenticated caller (`BRAINKB_TOKEN`, `brainkb_login`, or an `Authorization` header).
 Assigning/removing the `Admin` role and banning an Admin are **SuperAdmin-only**.
 | Tool | What it does |
 |------|--------------|
@@ -111,6 +111,57 @@ exempt. Over-limit calls return HTTP `429`.
 | `MCP_RATELIMIT_ADMIN_PER_MIN` | `30` | usermanagement admin calls |
 | `MCP_MAX_INGEST_BYTES` | `10000000` | max **raw-text** ingest size (0 = unlimited); file ingest is **not** capped |
 | `MCP_MAX_INGEST_FILES` | `50` | max files per `brainkb_ingest_files` call |
+| `MCP_RATELIMIT_MAX_KEYS` | `20000` | distinct callers tracked per window; once full, new callers are refused for the rest of the window rather than growing the map without bound |
+
+**`X-Forwarded-For` is only believed from `MCP_TRUSTED_PROXIES`** (see below). It
+is a caller-supplied header, so honouring it from any peer would let one client
+present a fresh identity per request — bypassing every limit including the
+brute-force bucket — and let it pin a *victim's* IP to exhaust their quota. With
+the list empty, limits key on the socket peer, which means everything arriving
+through a reverse proxy shares one bucket. Set it when you deploy behind one.
+
+## Hardening the hosted remote
+
+The `streamable-http` remote is reachable by anonymous callers and performs **no
+transport-level authentication** — every access decision happens downstream in the
+backend. Three inputs are therefore treated as hostile:
+
+| Env | Default | What it guards |
+|-----|---------|----------------|
+| `MCP_ALLOWED_BASE_URLS` | *(only `BRAINKB_URL`)* | Backends a caller may select via the `X-BrainKB-Base-URL` header or a tool's `base_url` argument |
+| `MCP_TRUSTED_PROXIES` | *(empty)* | Peers whose `X-Forwarded-For` / `X-Real-IP` is believed |
+| `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` may read from |
+| `MCP_ALLOW_SHARED_IDENTITY` | `false` | Opt in to `BRAINKB_TOKEN` as an ambient identity (single-user HTTP only) |
+
+**Backend URL allowlist.** The base URL is the *destination of requests that carry
+credentials* — the caller's bearer token, the env PAT, a session's stored
+password. Accepting an arbitrary value would give any caller SSRF (fetch
+`169.254.169.254`, internal load balancers, anything in the VPC, with the response
+body returned to them) *and* credential exfiltration (the token-exchange helpers
+POST `BRAINKB_TOKEN` to that host). Only `BRAINKB_URL` and entries in
+`MCP_ALLOWED_BASE_URLS` are honoured; anything else is refused with a clear error.
+Loopback is additionally allowed under stdio, where the caller is the local user.
+
+```bash
+# pair each backend with its usermanagement URL when :8010 -> :8004 doesn't apply
+MCP_ALLOWED_BASE_URLS=https://api.brainkb.org=https://users.brainkb.org
+```
+
+**File ingest resolves paths on the SERVER.** `brainkb_ingest_files(paths)` opens
+those paths in the *MCP process*, not on the caller's machine. Over stdio that's
+the same machine and is the point of the tool. Over http it would let a remote
+caller ingest `/proc/self/environ` (leaking `BRAINKB_TOKEN`), `/app/server.py`, or
+mounted secrets into a graph they own and read it back with `brainkb_read_space` —
+so it is **disabled unless `MCP_INGEST_ROOT` confines it**. Symlinks are resolved
+before the check, so they cannot point out of the root.
+
+**`BRAINKB_TOKEN` is ignored on http** unless `MCP_ALLOW_SHARED_IDENTITY=true`. It
+is an *ambient* credential with the same identity-shadowing problem that got
+`BRAINKB_EMAIL`/`BRAINKB_PASSWORD` auto-login removed: a caller who sends no
+credential of their own would silently execute as the token's owner.
+
+The server prints a warning to stderr at startup for each of these that is
+configured in a weakening way.
 
 Large-file ingest (TTL/JSON-LD up to ~5 GB per user) streams from disk with
 read/write timeouts disabled, so big uploads are not aborted. The **backend** must
@@ -123,7 +174,7 @@ large request bodies and a long enough idle timeout.
 cd brainkb_mcp
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # optionally set BRAINKB_URL / auto-login creds
+cp .env.example .env   # set BRAINKB_URL (and optionally BRAINKB_TOKEN for local use)
 ```
 
 ## Run (standalone, stdio — local testing)
@@ -156,10 +207,14 @@ one caller's credentials leaking to another. Resolution order:
    preferred, **stateless** way for the multi-user remote. A **PAT** or a
    **refresh token** here unlocks every service (the MCP exchanges it per
    service); a single **service access token** works for that service. An
-   optional `X-BrainKB-Base-URL` header overrides the backend URL.
+   optional `X-BrainKB-Base-URL` header selects the backend — but only from the
+   configured allowlist (see [Hardening](#hardening-the-hosted-remote)).
 2. **`BRAINKB_TOKEN` env — a Personal Access Token** (`brainkb_pat_…`). The
-   recommended way to stay logged in across tasks/sessions: it authenticates
-   per-call, so it survives when an in-session login would not.
+   recommended way to stay logged in across tasks/sessions *locally*: it
+   authenticates per-call, so it survives when an in-session login would not.
+   **Ignored on the streamable-http remote** unless
+   `MCP_ALLOW_SHARED_IDENTITY=true`, since there it is an ambient identity that
+   anonymous callers would inherit.
 3. **Per-session login** — `brainkb_login(email, password)` (or
    `brainkb_globus_login` → `brainkb_finish_login`, or `brainkb_use_token`) caches
    the credential for *that MCP session only*.
@@ -219,20 +274,17 @@ Required/runtime env:
 | Var | Default | Notes |
 |-----|---------|-------|
 | `MCP_TRANSPORT` | `streamable-http` | keep for hosting |
-| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | bind |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | bind *inside* the container |
 | `BRAINKB_URL` | `http://localhost:8010` | **must** be set to your reachable query_service |
 
-**Local auto-login (optional):** put `BRAINKB_EMAIL` / `BRAINKB_PASSWORD` in a
-git-ignored `.env` next to the compose file (see `.env.example`) so you can skip
-the `brainkb_login` tool. Verify with:
+Plus the guards in [Hardening the hosted remote](#hardening-the-hosted-remote) —
+at minimum `MCP_TRUSTED_PROXIES`, and `MCP_ALLOWED_BASE_URLS` if the deployment
+serves more than one backend.
 
-```bash
-docker compose up -d --force-recreate
-docker exec brainkb-mcp python -c "import server as s; print(s._resolve()['email'])"
-```
-
-> **Do this only for local/dev.** Baked-in credentials make *every* caller act as
-> that one user — never do it on the shared remote (see below).
+> The compose file publishes the port as `127.0.0.1:8080:8080`. The MCP speaks
+> plaintext HTTP and does no transport-level auth, so the reverse proxy that
+> terminates TLS should be the only thing that can reach it. Don't widen that
+> binding without a security group or firewall in front.
 
 ### Deploy on AWS (ECR + ECS/Fargate behind ALB)
 
@@ -262,15 +314,15 @@ Notes for the ALB:
 
 ### Credentials: local vs remote (important)
 
-- **Local/dev** — auto-login via `.env` (`BRAINKB_EMAIL`/`BRAINKB_PASSWORD`) is
-  fine and convenient; the `.env` is git-ignored.
-- **Remote/shared** — do **NOT** set `BRAINKB_EMAIL`/`BRAINKB_PASSWORD` on the
-  hosted container. That would make every caller act as one shared user and defeat
-  multi-user isolation. Instead each user authenticates **per request** with their
-  own `Authorization: Bearer <BrainKB token>` header (forwarded by the ALB). Never
-  commit credentials or put them in the image; if a genuine service identity is
-  ever required, inject it from **AWS Secrets Manager** (ECS `secrets:`), not from
-  a baked-in env var, and scope it minimally.
+- **Local/dev** — put a PAT in a git-ignored `.env` as `BRAINKB_TOKEN` and skip
+  the login tools entirely.
+- **Remote/shared** — every user authenticates **per request** with their own
+  `Authorization: Bearer <BrainKB token>` header (forwarded by the ALB). A
+  baked-in `BRAINKB_TOKEN` is *ignored* on this transport, and there is no
+  email/password auto-login, precisely so no caller can inherit a shared identity.
+  Never commit credentials or put them in the image; if a genuine service identity
+  is ever required, inject it from **AWS Secrets Manager** (ECS `secrets:`), not
+  from a baked-in env var, and scope it minimally.
 
 ## Register with Claude Code
 
@@ -306,14 +358,11 @@ whichever you prefer — both expose the same `brainkb_*` tools.
    claude mcp list | grep brainkb        # -> brainkb: http://localhost:8080/mcp (HTTP) - ✔ Connected
    ```
 
-3. Auth: either call `brainkb_login(email, password)` in-session, or bake
-   auto-login into the container:
-
-   ```bash
-   BRAINKB_URL=http://host.docker.internal:8010 \
-   BRAINKB_EMAIL=you@example.com BRAINKB_PASSWORD=*** \
-     docker compose up -d --force-recreate
-   ```
+3. Auth: call `brainkb_login(email, password)` / `brainkb_globus_login()`
+   in-session, or `brainkb_use_token("brainkb_pat_…")`, or have your client send
+   an `Authorization: Bearer` header. A container-level `BRAINKB_TOKEN` will
+   **not** be used on this transport — see
+   [Hardening the hosted remote](#hardening-the-hosted-remote).
 
 ### B. stdio (Claude Code launches the process directly)
 
@@ -337,7 +386,7 @@ needed; the process talks to the query_service at `localhost:8010` directly.
 
 ## Typical flow
 
-1. `brainkb_login(email, password)` (or set `BRAINKB_EMAIL`/`BRAINKB_PASSWORD`).
+1. `brainkb_login(email, password)` / `brainkb_globus_login()` (or set `BRAINKB_TOKEN` to a PAT for local use).
 2. `brainkb_create_space("my-lab", "My Lab", "private")`.
 3. `brainkb_add_space_graph("my-lab", "https://brainkb.org/graph/my-lab/")`.
 4. `brainkb_ingest_text("https://brainkb.org/graph/my-lab/", "<ttl…>")` → `job_id`.

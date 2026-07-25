@@ -13,10 +13,29 @@ Transport: stdio (default). Run with:  python server.py
 Configuration (env, all optional):
   BRAINKB_URL       Base URL of the query_service (default http://localhost:8010)
   BRAINKB_TOKEN     A Personal Access Token (brainkb_pat_...) — the recommended
-                    way to authenticate. Mint one with brainkb_create_token()
-                    after logging in once, then paste it here; no login/browser is
-                    needed afterward until it expires. Carries the caller's
-                    identity per call, so it can't be shadowed by a stale fallback.
+                    way to authenticate for LOCAL (stdio) use. Mint one with
+                    brainkb_create_token() after logging in once, then paste it
+                    here; no login/browser is needed afterward until it expires.
+                    Ignored on the hosted remote unless MCP_ALLOW_SHARED_IDENTITY
+                    is set, since there it would be a shared fallback identity.
+
+Hardening knobs for the hosted (streamable-http) remote:
+  MCP_ALLOWED_BASE_URLS    Comma-separated backends a caller may target, each
+                           optionally paired with its usermanagement URL:
+                           'https://api.brainkb.org=https://users.brainkb.org'.
+                           BRAINKB_URL is always allowed. Anything else is
+                           refused — the base URL is the destination of requests
+                           that carry credentials, so an arbitrary value is both
+                           SSRF and credential exfiltration.
+  MCP_TRUSTED_PROXIES      Proxy IPs whose X-Forwarded-For may be believed. Empty
+                           by default; an unvalidated forwarding header lets a
+                           caller mint a new identity per request and evade every
+                           rate limit.
+  MCP_INGEST_ROOT          Directory brainkb_ingest_files may read from. File
+                           ingest is disabled on the remote unless this is set,
+                           because paths resolve on the SERVER's filesystem.
+  MCP_ALLOW_SHARED_IDENTITY  Opt in to BRAINKB_TOKEN as an ambient identity
+                           (single-user HTTP deployments only).
 
 There is NO email/password auto-login: a baked-in credential could silently act
 as a fallback identity and mis-attribute another user's actions, so it was
@@ -53,6 +72,14 @@ mcp = FastMCP(
 )
 
 _DEFAULT_URL = os.getenv("BRAINKB_URL", "http://localhost:8010").rstrip("/")
+
+# Which transport we were started with. Several protections below are only correct
+# for the multi-user hosted remote (streamable-http), where callers are untrusted
+# and anonymous; over stdio the caller IS the local user, so the same restrictions
+# would only get in their way.
+_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower().replace("_", "-")
+_IS_REMOTE = _TRANSPORT in ("http", "streamable-http")
+
 _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 # File ingest streams potentially very large uploads (TTL/JSON-LD up to ~5GB per
 # user). A fixed read/write timeout would abort a legitimate large upload, so we
@@ -69,7 +96,7 @@ _UPLOAD_TIMEOUT = httpx.Timeout(None, connect=30.0)
 # previous occupant's cached refresh token (wrong-user auth), and it also loses
 # writes whenever the address shifts between two calls of the same login. The weak
 # keys additionally let dead sessions' credentials be reclaimed automatically.
-_SESSIONS: "weakref.WeakKeyDictionary[Any, Dict[str, str]]" = weakref.WeakKeyDictionary()
+_SESSIONS: "weakref.WeakKeyDictionary[Any, Dict[str, Any]]" = weakref.WeakKeyDictionary()
 
 
 # --------------------------------------------------------------------------- #
@@ -166,28 +193,53 @@ _RL_AUTH = _int_env("MCP_RATELIMIT_AUTH_PER_MIN", 8)       # register / login (b
 _MAX_INGEST_BYTES = _int_env("MCP_MAX_INGEST_BYTES", 10_000_000)  # per raw-text ingest
 _MAX_INGEST_FILES = _int_env("MCP_MAX_INGEST_FILES", 50)          # per file-ingest call
 
+_RL_MAX_KEYS = _int_env("MCP_RATELIMIT_MAX_KEYS", 20000)
+
+# Reverse proxies whose X-Forwarded-For / X-Real-IP we believe. EMPTY BY DEFAULT:
+# an unvalidated forwarding header is caller-controlled, so honouring it from any
+# peer lets one client rotate a fresh identity per request (bypassing every limit,
+# including the brute-force bucket) and lets it pin a VICTIM's IP to exhaust their
+# quota. Set MCP_TRUSTED_PROXIES to your ALB/nginx source IPs when deployed behind
+# one; until then the socket peer — which cannot be forged — is used.
+_TRUSTED_PROXIES = {p.strip() for p in os.getenv("MCP_TRUSTED_PROXIES", "").split(",") if p.strip()}
+
 _RL_LOCK = threading.Lock()
 _RL_BUCKETS: Dict[Tuple[str, str], list] = {}  # (client_id, bucket) -> [window, count]
+_RL_LAST_SWEEP = [-1]  # window index of the most recent eviction sweep
+
+
+def _peer_ip() -> Optional[str]:
+    """Socket peer address of the inbound request (None for stdio)."""
+    try:
+        req = getattr(mcp.get_context().request_context, "request", None)
+        client = getattr(req, "client", None)
+        if client and getattr(client, "host", None):
+            return client.host
+    except Exception:
+        pass
+    return None
 
 
 def _client_id() -> str:
     """Identify the caller for rate-limiting. Prefer source IP so many users
     behind one reverse proxy are still throttled per origin; fall back to the MCP
-    session; 'local' for stdio (exempt)."""
-    hdrs = _request_headers()
-    xff = hdrs.get("x-forwarded-for", "")
-    if xff:
-        return "ip:" + xff.split(",")[0].strip()
-    xri = hdrs.get("x-real-ip", "")
-    if xri:
-        return "ip:" + xri.strip()
-    try:
-        req = getattr(mcp.get_context().request_context, "request", None)
-        client = getattr(req, "client", None)
-        if client and getattr(client, "host", None):
-            return "ip:" + client.host
-    except Exception:
-        pass
+    session; 'local' for stdio (exempt).
+
+    Forwarding headers are only trusted from a peer in MCP_TRUSTED_PROXIES, and we
+    take the RIGHTMOST entry — the hop that trusted proxy actually observed. The
+    leftmost entry is whatever the client chose to send and is trivially spoofed.
+    """
+    peer = _peer_ip()
+    if peer and peer in _TRUSTED_PROXIES:
+        hdrs = _request_headers()
+        xff = hdrs.get("x-forwarded-for", "")
+        if xff:
+            return "ip:" + xff.split(",")[-1].strip()
+        xri = hdrs.get("x-real-ip", "")
+        if xri:
+            return "ip:" + xri.strip()
+    if peer:
+        return "ip:" + peer
     sk = _session_key()
     return f"sess:{sk}" if sk is not None else "local"
 
@@ -205,12 +257,23 @@ def _rate_ok(bucket: str, limit: int) -> bool:
     with _RL_LOCK:
         slot = _RL_BUCKETS.get(key)
         if slot is None or slot[0] != win:
+            if len(_RL_BUCKETS) >= _RL_MAX_KEYS:
+                # Evict entries from previous windows — but at most once per
+                # window: the sweep is O(len(_RL_BUCKETS)) and runs under the
+                # global lock, so doing it on every insert while the map is full
+                # would itself be the denial of service.
+                if _RL_LAST_SWEEP[0] != win:
+                    _RL_LAST_SWEEP[0] = win
+                    for k, v in list(_RL_BUCKETS.items()):
+                        if v[0] != win:
+                            _RL_BUCKETS.pop(k, None)
+                if len(_RL_BUCKETS) >= _RL_MAX_KEYS:
+                    # Still full: every entry belongs to the CURRENT window, i.e. a
+                    # flood of distinct callers. Refuse the new key instead of
+                    # growing without bound (fail closed — a genuinely new caller
+                    # may be turned away for the rest of this window).
+                    return False
             _RL_BUCKETS[key] = [win, 1]
-            # Bound memory: drop stale windows if the map grows large.
-            if len(_RL_BUCKETS) > 20000:
-                for k, v in list(_RL_BUCKETS.items()):
-                    if v[0] != win:
-                        _RL_BUCKETS.pop(k, None)
             return True
         if slot[1] >= limit:
             return False
@@ -232,6 +295,78 @@ class _NotAuthed(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
+# Backend URL allowlist (SSRF / credential-exfiltration guard)
+# --------------------------------------------------------------------------- #
+# The backend base URL is caller-influenced: via the `X-BrainKB-Base-URL` header on
+# the hosted remote, and via the `base_url` argument of the login tools. Both are
+# used as the target of requests that CARRY CREDENTIALS — the caller's bearer
+# token, the env Personal Access Token, a session's stored password. Accepting an
+# arbitrary value therefore gives any caller two things at once:
+#
+#   * SSRF — the server fetches an attacker-chosen host (link-local metadata at
+#     169.254.169.254, internal load balancers, anything in the VPC) and returns
+#     the response body to them, and
+#   * credential theft — BRAINKB_TOKEN / a session PAT / stored credentials get
+#     POSTed to that host by the token-exchange helpers.
+#
+# So a base URL is only honoured if it is explicitly configured. Loopback is also
+# allowed under stdio, where the caller is the local user and pointing at a dev
+# backend on another port is routine.
+#
+# MCP_ALLOWED_BASE_URLS is a comma-separated list of query_service base URLs, each
+# optionally paired with its usermanagement URL:
+#     MCP_ALLOWED_BASE_URLS=https://api.brainkb.org=https://users.brainkb.org,http://localhost:8011
+
+def _norm_base(u: Optional[str]) -> str:
+    return (u or "").strip().rstrip("/")
+
+
+def _parse_allowed() -> Dict[str, Optional[str]]:
+    out: Dict[str, Optional[str]] = {_norm_base(_DEFAULT_URL): None}  # paired with _UM_URL
+    for entry in os.getenv("MCP_ALLOWED_BASE_URLS", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        q, _, u = entry.partition("=")
+        q = _norm_base(q)
+        if q:
+            out[q] = _norm_base(u) or None
+    return out
+
+
+_ALLOWED_BASES: Dict[str, Optional[str]] = _parse_allowed()
+
+
+def _is_loopback(url: str) -> bool:
+    try:
+        return httpx.URL(url).host in ("localhost", "127.0.0.1", "::1")
+    except Exception:
+        return False
+
+
+def _allowed_base(candidate: Optional[str] = "") -> str:
+    """Validate a caller-supplied backend base URL against the allowlist.
+
+    Returns the default backend when nothing was supplied; raises _NotAuthed for an
+    unknown host rather than silently falling back, so a misconfiguration is
+    visible instead of quietly routing to the wrong backend.
+    """
+    base = _norm_base(candidate)
+    if not base:
+        return _norm_base(_DEFAULT_URL)
+    if base in _ALLOWED_BASES:
+        return base
+    if not _IS_REMOTE and _is_loopback(base):
+        return base
+    raise _NotAuthed(
+        f"Backend URL {base!r} is not allowed. Credentials are only ever sent to "
+        "configured backends; add it to the MCP_ALLOWED_BASE_URLS environment "
+        "variable (as '<query-url>' or '<query-url>=<usermanagement-url>') if it "
+        "is genuinely yours."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Phase 2 SSO: single login -> per-service token exchange
 # --------------------------------------------------------------------------- #
 # usermanagement is the single issuer. A login mints a REFRESH token; we exchange
@@ -242,6 +377,12 @@ class _NotAuthed(RuntimeError):
 
 _AUD_QUERY = "query_service"
 _AUD_UM = "usermanagement"
+
+# Escape hatch for a deliberately single-user HTTP deployment: allow the env
+# BRAINKB_TOKEN to serve as the identity for callers who send no credential of
+# their own. Off by default — on a shared remote it makes every anonymous caller
+# act as the token's owner.
+_ALLOW_SHARED_IDENTITY = os.getenv("MCP_ALLOW_SHARED_IDENTITY", "").strip().lower() in ("1", "true", "yes")
 
 # A cached login is not forever: the session expires with its refresh token (or,
 # as a hard cap even if credentials are cached, after MCP_SESSION_TTL_MIN). When it
@@ -277,11 +418,26 @@ def _session_expired(sd: dict) -> bool:
 
 
 def _um_base(base: str) -> str:
-    """usermanagement base URL for SSO login/exchange, given the query_service base."""
-    base = base.rstrip("/")
-    if base == _DEFAULT_URL:
+    """usermanagement base URL for SSO login/exchange, given the query_service base.
+
+    `base` must already have passed _allowed_base(). The port rewrite below is only
+    a convenience for the dev layout (:8010 -> :8004); it cannot be relied on for a
+    real deployment (e.g. https://api.brainkb.org has no :8010, and the old code
+    silently sent usermanagement traffic — PAT exchanges, admin calls — to the
+    query_service host instead). Configure the pairing explicitly there.
+    """
+    base = _norm_base(base)
+    if base == _norm_base(_DEFAULT_URL):
         return _UM_URL
-    return base.replace(":8010", ":8004")
+    paired = _ALLOWED_BASES.get(base)
+    if paired:
+        return paired
+    if ":8010" in base:
+        return base.replace(":8010", ":8004")
+    raise _NotAuthed(
+        f"No usermanagement URL is configured for backend {base!r}. Pair them in "
+        "MCP_ALLOWED_BASE_URLS as '<query-url>=<usermanagement-url>'."
+    )
 
 
 def _sso_login(um: str, email: str, password: str) -> Optional[str]:
@@ -377,7 +533,7 @@ def _token_for(audience: str) -> Dict[str, str]:
     could silently shadow a real login and mis-attribute actions to the wrong user.
     """
     hdrs = _request_headers()
-    base = hdrs.get("x-brainkb-base-url", _DEFAULT_URL).rstrip("/")
+    base = _allowed_base(hdrs.get("x-brainkb-base-url"))
     um = _um_base(base)
     key = _session_key()
 
@@ -426,8 +582,13 @@ def _token_for(audience: str) -> Dict[str, str]:
             return {"url": sd.get("url", base), "token": sd["legacy_token"], "email": sd.get("email", "")}
 
     # 3) env Personal Access Token (browser-free: mint once, paste into config).
+    #    IGNORED on the hosted remote unless explicitly opted into: there it is an
+    #    ambient fallback identity with exactly the identity-shadowing problem that
+    #    got env email/password removed — an anonymous caller who sends no
+    #    Authorization header would silently execute as the PAT's owner, and the
+    #    result would even be cached into their session below.
     pat_env = os.getenv("BRAINKB_TOKEN", "").strip()
-    if _is_pat(pat_env):
+    if _is_pat(pat_env) and (not _IS_REMOTE or _ALLOW_SHARED_IDENTITY):
         ex = _pat_exchange(um, pat_env, audience)
         if ex:
             email = _decode_sub(ex[0]) or ""
@@ -489,6 +650,28 @@ def _me() -> str:
     return _resolve()["email"]
 
 
+def _seg(value: str) -> str:
+    """Escape a caller-supplied value for use as exactly ONE URL path segment.
+
+    urllib's quote() defaults to safe="/", which leaves slashes intact — so a slug
+    of '../../api/admin/users' passed through quote() rewrites the request path
+    (httpx collapses the dot segments before sending). safe="" percent-encodes the
+    slashes so the value stays a single segment. Bare '.'/'..' still survive, since
+    dots are unreserved and never encoded; _path_ok below rejects those.
+    """
+    return quote((value or "").strip(), safe="")
+
+
+def _path_ok(path: str) -> bool:
+    """False if a request path contains an empty or dot segment — i.e. something
+    that would traverse to a different endpoint than the tool intended."""
+    return not any(p in ("", ".", "..") for p in path.split("/")[1:])
+
+
+_BAD_PATH = {"error": True, "status_code": 400,
+             "detail": "Invalid or empty identifier in the request path."}
+
+
 def _result(resp: httpx.Response) -> Any:
     """Return parsed JSON on success, else a compact error dict (never raises)."""
     ok = resp.status_code < 400
@@ -503,6 +686,8 @@ def _result(resp: httpx.Response) -> Any:
 
 
 def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    if not _path_ok(path):
+        return dict(_BAD_PATH)
     if not _rate_ok("read", _RL_READ):
         return _rl_error("read", _RL_READ)
     try:
@@ -521,6 +706,8 @@ def _post(path: str, params: Optional[Dict[str, Any]] = None,
           json: Any = None, content: Optional[bytes] = None,
           ctype: Optional[str] = None, files: Any = None,
           timeout: Optional[httpx.Timeout] = None) -> Any:
+    if not _path_ok(path):
+        return dict(_BAD_PATH)
     if not _rate_ok("write", _RL_WRITE):
         return _rl_error("write", _RL_WRITE)
     try:
@@ -539,6 +726,8 @@ def _post(path: str, params: Optional[Dict[str, Any]] = None,
 
 
 def _patch(path: str, json: Any = None) -> Any:
+    if not _path_ok(path):
+        return dict(_BAD_PATH)
     if not _rate_ok("write", _RL_WRITE):
         return _rl_error("write", _RL_WRITE)
     try:
@@ -554,6 +743,8 @@ def _patch(path: str, json: Any = None) -> Any:
 
 
 def _delete(path: str) -> Any:
+    if not _path_ok(path):
+        return dict(_BAD_PATH)
     if not _rate_ok("write", _RL_WRITE):
         return _rl_error("write", _RL_WRITE)
     try:
@@ -578,10 +769,14 @@ _UM_URL = (os.getenv("USERMANAGEMENT_URL") or _DEFAULT_URL.replace(":8010", ":80
 
 
 def _um(method: str, path: str, json: Any = None, params: Any = None, _retry: bool = True) -> Any:
+    if not _path_ok(path):
+        return dict(_BAD_PATH)
     if _retry and not _rate_ok("admin", _RL_ADMIN):
         return _rl_error("admin", _RL_ADMIN)
-    base = _request_headers().get("x-brainkb-base-url", _DEFAULT_URL).rstrip("/")
-    um = _um_base(base)
+    try:
+        um = _um_base(_allowed_base(_request_headers().get("x-brainkb-base-url")))
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
     try:
         ctx = _token_for(_AUD_UM)
         with httpx.Client(timeout=_TIMEOUT) as c:
@@ -633,8 +828,12 @@ def brainkb_login(email: str, password: str, base_url: str = "") -> str:
     if not _rate_ok("auth", _RL_AUTH):
         return _rl_error("auth", _RL_AUTH)["detail"]
     key = _session_key()
-    base = (base_url or _DEFAULT_URL).rstrip("/")
-    um = _um_base(base)
+    try:
+        # base_url decides where this password is sent — allowlist it.
+        base = _allowed_base(base_url)
+        um = _um_base(base)
+    except _NotAuthed as e:
+        return str(e)
     try:
         # SSO first: single login -> refresh token (exchanged per service later).
         refresh = _sso_login(um, email, password)
@@ -672,8 +871,10 @@ def brainkb_globus_login(provider: str = "globus", base_url: str = "") -> str:
     (The browser step is unavoidable: only the user can consent at the provider.)"""
     if not _rate_ok("auth", _RL_AUTH):
         return _rl_error("auth", _RL_AUTH)["detail"]
-    base = (base_url or _DEFAULT_URL).rstrip("/")
-    um = _um_base(base)
+    try:
+        um = _um_base(_allowed_base(base_url))
+    except _NotAuthed as e:
+        return str(e)
     try:
         r = httpx.post(f"{um}/api/auth/cli/start", json={"provider": provider}, timeout=30)
         r.raise_for_status()
@@ -696,8 +897,12 @@ def brainkb_finish_login(code: str, base_url: str = "") -> str:
     if not _rate_ok("auth", _RL_AUTH):
         return _rl_error("auth", _RL_AUTH)["detail"]
     key = _session_key()
-    base = (base_url or _DEFAULT_URL).rstrip("/")
-    um = _um_base(base)
+    try:
+        # base_url decides where this single-use OAuth code is redeemed.
+        base = _allowed_base(base_url)
+        um = _um_base(base)
+    except _NotAuthed as e:
+        return str(e)
     try:
         r = httpx.post(f"{um}/api/auth/cli/exchange", json={"code": code}, timeout=30)
         if r.status_code >= 400:
@@ -730,6 +935,10 @@ def brainkb_logout() -> str:
 def brainkb_whoami() -> Dict[str, Any]:
     """Report the current caller's auth state (base URL, email, authenticated, and
     when the cached session expires)."""
+    # Rate-limited like a read: resolving auth can trigger a token exchange against
+    # the backend, so an unmetered whoami is a request amplifier.
+    if not _rate_ok("read", _RL_READ):
+        return _rl_error("read", _RL_READ)
     try:
         ctx = _resolve()
         out = {"base_url": ctx["url"], "email": ctx["email"], "authenticated": True}
@@ -789,8 +998,12 @@ def brainkb_use_token(token: str, base_url: str = "") -> str:
     if not _rate_ok("auth", _RL_AUTH):
         return _rl_error("auth", _RL_AUTH)["detail"]
     key = _session_key()
-    base = (base_url or _DEFAULT_URL).rstrip("/")
-    um = _um_base(base)
+    try:
+        # base_url decides where this token is presented — allowlist it.
+        base = _allowed_base(base_url)
+        um = _um_base(base)
+    except _NotAuthed as e:
+        return str(e)
     if not _is_pat(token):
         return "That doesn't look like a BrainKB access token (expected brainkb_pat_...)."
     ex = _pat_exchange(um, token.strip(), _AUD_QUERY)
@@ -841,13 +1054,13 @@ def brainkb_create_space(slug: str, name: str, visibility: str = "private",
 def brainkb_set_space_visibility(slug: str, visibility: str) -> Any:
     """Set a space 'public' (anyone, even anonymous, can read) or 'private'
     (members only). Owner only."""
-    return _patch(f"/api/spaces/{quote(slug)}/visibility", json={"visibility": visibility})
+    return _patch(f"/api/spaces/{_seg(slug)}/visibility", json={"visibility": visibility})
 
 
 @mcp.tool()
 def brainkb_add_space_member(slug: str, member_email: str, role: str = "viewer") -> Any:
     """Add/update a space member. role: 'owner' | 'editor' | 'viewer'. Owner only."""
-    return _post(f"/api/spaces/{quote(slug)}/members",
+    return _post(f"/api/spaces/{_seg(slug)}/members",
                  json={"member": member_email, "role": role})
 
 
@@ -858,13 +1071,45 @@ def brainkb_add_space_graph(slug: str, named_graph_iri: str, description: str = 
     The named_graph_iri is **globally unique** — one graph belongs to exactly one
     space. If it's already registered (to any space) the call returns 409; graph
     bindings are permanent (no unregister/delete)."""
-    return _post(f"/api/spaces/{quote(slug)}/graphs",
+    return _post(f"/api/spaces/{_seg(slug)}/graphs",
                  json={"named_graph_url": named_graph_iri, "description": description})
 
 
 # --------------------------------------------------------------------------- #
 # ingest
 # --------------------------------------------------------------------------- #
+# File paths in brainkb_ingest_files are resolved on the SERVER, not on the
+# caller's machine. Over stdio those are the same machine, so any path the user can
+# read is fair game. Over streamable-http they are not: an unconstrained path lets
+# a remote caller upload /proc/self/environ (which leaks BRAINKB_TOKEN),
+# /app/server.py, or mounted secrets into a graph they own and read it straight
+# back with brainkb_read_space. So file ingest is refused on the hosted remote
+# unless MCP_INGEST_ROOT confines it to a directory.
+_INGEST_ROOT = os.getenv("MCP_INGEST_ROOT", "").strip()
+
+
+def _ingest_path(p: str) -> str:
+    """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
+
+    realpath() first, so symlinks cannot point out of the configured root.
+    """
+    rp = os.path.realpath(os.path.expanduser(p))
+    if _INGEST_ROOT:
+        root = os.path.realpath(os.path.expanduser(_INGEST_ROOT))
+        if rp != root and not rp.startswith(root + os.sep):
+            raise PermissionError(
+                f"{p!r} is outside the permitted ingest directory (MCP_INGEST_ROOT)."
+            )
+    elif _IS_REMOTE:
+        raise PermissionError(
+            "File ingest is disabled on the hosted remote because file paths are "
+            "read from the SERVER's filesystem, not yours. Use brainkb_ingest_text "
+            "instead, or ask the operator to set MCP_INGEST_ROOT to a directory "
+            "that may be ingested from."
+        )
+    if not os.path.isfile(rp):
+        raise PermissionError(f"{p!r} is not a regular file.")
+    return rp
 
 @mcp.tool()
 def brainkb_ingest_text(named_graph_iri: str, data: str) -> Any:
@@ -894,9 +1139,10 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
     try:
         files = []
         for p in file_paths:
-            fh = open(p, "rb")
+            rp = _ingest_path(p)
+            fh = open(rp, "rb")
             handles.append(fh)
-            files.append(("files", (os.path.basename(p), fh, "application/octet-stream")))
+            files.append(("files", (os.path.basename(rp), fh, "application/octet-stream")))
         # No byte cap here (only a file-count cap): TTL/JSON-LD uploads may be
         # large (up to ~5GB per user). Use the long upload timeout so big
         # streams aren't aborted mid-transfer.
@@ -904,6 +1150,8 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
                      params={"user_id": _me(), "named_graph_iri": named_graph_iri,
                              "max_concurrency": max_concurrency},
                      files=files, timeout=_UPLOAD_TIMEOUT)
+    except PermissionError as e:
+        return {"error": True, "status_code": 403, "detail": str(e)}
     except FileNotFoundError as e:
         return {"error": True, "detail": str(e)}
     finally:
@@ -956,7 +1204,7 @@ def brainkb_search(q: str, space: str = "", limit: int = 25, offset: int = 0) ->
 def brainkb_read_space(slug: str) -> Any:
     """Read all RDF (JSON-LD) in a space's graphs. Public spaces are readable by
     anyone; private spaces require membership."""
-    return _get(f"/api/spaces/{quote(slug)}/data")
+    return _get(f"/api/spaces/{_seg(slug)}/data")
 
 
 @mcp.tool()
@@ -1069,7 +1317,7 @@ def brainkb_revoke_role_capability(role: str, capability: str) -> Any:
 @mcp.tool()
 def brainkb_list_access_rules(slug: str) -> Any:
     """List a space's fine-grained access rules (member/manager of the space)."""
-    return _get(f"/api/spaces/{quote(slug)}/access-rules")
+    return _get(f"/api/spaces/{_seg(slug)}/access-rules")
 
 
 @mcp.tool()
@@ -1081,7 +1329,7 @@ def brainkb_add_access_rule(slug: str, action: str, subject_type: str, subject_v
     When rules exist for an action, only matching callers may perform it; the space
     owner and Admin/SuperAdmin always bypass (no lockout). Example: restrict writing
     to Admins -> action='write', subject_type='global_role', subject_value='Admin'."""
-    return _post(f"/api/spaces/{quote(slug)}/access-rules",
+    return _post(f"/api/spaces/{_seg(slug)}/access-rules",
                  json={"action": action, "subject_type": subject_type, "subject_value": subject_value})
 
 
@@ -1089,7 +1337,7 @@ def brainkb_add_access_rule(slug: str, action: str, subject_type: str, subject_v
 def brainkb_remove_access_rule(slug: str, rule_id: int) -> Any:
     """(Space manager) Delete a fine-grained access rule by its id
     (see brainkb_list_access_rules)."""
-    return _delete(f"/api/spaces/{quote(slug)}/access-rules/{rule_id}")
+    return _delete(f"/api/spaces/{_seg(slug)}/access-rules/{rule_id}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1141,7 +1389,7 @@ def brainkb_remove_role(email: str, role: str) -> Any:
     pid = _um_profile_id(email)
     if not pid:
         return {"error": True, "detail": f"no profile found for {email}"}
-    return _um("DELETE", f"/api/admin/users/{pid}/roles/{quote(role)}")
+    return _um("DELETE", f"/api/admin/users/{pid}/roles/{_seg(role)}")
 
 
 @mcp.tool()
@@ -1193,11 +1441,39 @@ def brainkb_create_permission(name: str, resource: str, action: str, description
                json={"name": name, "resource": resource, "action": action, "description": description})
 
 
+def _startup_warnings() -> None:
+    """Surface deployment settings that weaken the multi-user guarantees."""
+    if not _IS_REMOTE:
+        return
+
+    def warn(msg: str) -> None:
+        print(f"[brainkb-mcp] WARNING: {msg}", file=sys.stderr, flush=True)
+
+    if os.getenv("BRAINKB_TOKEN", "").strip():
+        if _ALLOW_SHARED_IDENTITY:
+            warn("MCP_ALLOW_SHARED_IDENTITY is on — callers who send no credential "
+                 "of their own will act as BRAINKB_TOKEN's owner. Single-user "
+                 "deployments only.")
+        else:
+            warn("BRAINKB_TOKEN is set but IGNORED on this transport (it would be a "
+                 "shared fallback identity). Callers must authenticate per request.")
+    if not _TRUSTED_PROXIES:
+        warn("MCP_TRUSTED_PROXIES is empty — X-Forwarded-For is ignored and rate "
+             "limits key on the socket peer. Behind a proxy that means all callers "
+             "share one bucket; set it to your proxy's IP(s).")
+    if _INGEST_ROOT:
+        warn(f"brainkb_ingest_files may read from {_INGEST_ROOT!r} on the SERVER's "
+             "filesystem. Ensure it holds nothing callers shouldn't retrieve.")
+    if _DEFAULT_URL.startswith("http://") and not _is_loopback(_DEFAULT_URL):
+        warn(f"BRAINKB_URL is plaintext HTTP ({_DEFAULT_URL}) — bearer tokens will "
+             "cross the network unencrypted.")
+
+
 if __name__ == "__main__":
     # Default to stdio (local use). Set MCP_TRANSPORT=streamable-http to run as the
     # hosted remote (behind TLS at https://mcp.brainkb.org/mcp) — used later.
-    transport = os.getenv("MCP_TRANSPORT", "stdio").lower().replace("_", "-")
-    if transport in ("http", "streamable-http"):
+    _startup_warnings()
+    if _IS_REMOTE:
         mcp.run(transport="streamable-http")
     else:
         mcp.run()

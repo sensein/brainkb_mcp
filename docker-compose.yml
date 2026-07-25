@@ -2,21 +2,38 @@
 # The MCP reaches the BrainKB query_service via BRAINKB_URL. To hit a stack
 # running on the host from inside the container, use host.docker.internal.
 #
-# Local auto-login (optional): put BRAINKB_EMAIL / BRAINKB_PASSWORD in a
-# git-ignored .env next to this file (see .env.example). Do NOT commit it, and do
-# NOT bake credentials into a remote/production image — see README "Remote
-# deployment" for the safe (per-user header) approach.
+# Auth is per-caller: a PAT or an 'Authorization: Bearer' header. There is no
+# auto-login, and a baked-in BRAINKB_TOKEN is ignored on this transport (it would
+# make every anonymous caller act as one user) unless MCP_ALLOW_SHARED_IDENTITY
+# is set. Never commit credentials or bake them into an image.
 services:
   brainkb-mcp:
     build: .
     image: brainkb-mcp:local
     container_name: brainkb-mcp
     ports:
-      - "8080:8080"
+      # Bound to loopback: the MCP speaks PLAINTEXT http and performs no
+      # transport-level authentication, so it must not be reachable directly.
+      # Terminate TLS in the reverse proxy in front of it and let that be the only
+      # ingress. Change to "8080:8080" only if nothing else can reach the host.
+      - "127.0.0.1:8080:8080"
     environment:
       MCP_TRANSPORT: streamable-http
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8080"
+      # Backends a caller may target via X-BrainKB-Base-URL / base_url. BRAINKB_URL
+      # is always allowed; everything else is refused, because that URL is where
+      # credentials get sent. Pair each with its usermanagement URL when the
+      # :8010 -> :8004 convention doesn't apply:
+      #   MCP_ALLOWED_BASE_URLS: https://api.brainkb.org=https://users.brainkb.org
+      MCP_ALLOWED_BASE_URLS: ${MCP_ALLOWED_BASE_URLS:-}
+      # IPs of the reverse proxy in front of this container. Required for
+      # per-client rate limiting — without it X-Forwarded-For is ignored (it is
+      # caller-controlled and forgeable) and every request keys on the proxy.
+      MCP_TRUSTED_PROXIES: ${MCP_TRUSTED_PROXIES:-}
+      # Directory brainkb_ingest_files may read. Paths resolve on the SERVER's
+      # filesystem, so file ingest stays disabled here unless you set this.
+      MCP_INGEST_ROOT: ${MCP_INGEST_ROOT:-}
       # The BrainKB stack runs on the SAME host (EC2), publishing :8010/:8004.
       # A container's own `localhost` isn't the host, so we reach them via
       # host.docker.internal (mapped below for Linux). Overridable from .env.
@@ -28,7 +45,7 @@ services:
     # :8080 cleanly published for the mcp.brainkb.org reverse proxy.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # Config only (BRAINKB_URL / optional BRAINKB_TOKEN). No auto-login creds —
+    # Config only (BRAINKB_URL and the guards above). No auto-login creds —
     # authenticate with a PAT or a per-caller Authorization header.
     env_file:
       - path: .env
