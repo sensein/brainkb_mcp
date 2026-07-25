@@ -1,3 +1,8 @@
-mcp>=1.2.0
-httpx>=0.27.0
-uvicorn>=0.29.0
+# Upper bounds pin the major version so a breaking upstream release can't be
+# pulled into a rebuild unreviewed. For a reproducible deployment image, generate
+# a fully pinned, hash-locked file from this one:
+#   pip-compile --generate-hashes requirements.txt -o requirements.lock
+# and install with `pip install --require-hashes -r requirements.lock`.
+mcp>=1.2.0,<2
+httpx>=0.27.0,<1
+uvicorn>=0.29.0,<1
