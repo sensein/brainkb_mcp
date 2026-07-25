@@ -278,8 +278,11 @@ Required/runtime env:
 | `BRAINKB_URL` | `http://localhost:8010` | **must** be set to your reachable query_service |
 
 Plus the guards in [Hardening the hosted remote](#hardening-the-hosted-remote) —
-at minimum `MCP_TRUSTED_PROXIES`, and `MCP_ALLOWED_BASE_URLS` if the deployment
-serves more than one backend.
+at minimum `MCP_TRUSTED_PROXIES` (your ALB/nginx source IPs, else X-Forwarded-For
+is ignored and rate limits key on the proxy), `MCP_ALLOWED_BASE_URLS` if the
+deployment serves more than one backend, and `MCP_INGEST_ROOT` **only if** you want
+`brainkb_ingest_files` enabled on the remote (it's disabled otherwise). Leave
+`MCP_ALLOW_SHARED_IDENTITY` unset unless it's a single-user deployment.
 
 > The compose file publishes the port as `127.0.0.1:8080:8080`. The MCP speaks
 > plaintext HTTP and does no transport-level auth, so the reverse proxy that
