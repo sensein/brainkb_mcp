@@ -341,12 +341,17 @@ USERMANAGEMENT_URL=http://host.docker.internal:8004
 # X-BrainKB-Base-URL / base_url cannot redirect credentials anywhere.
 # MCP_ALLOWED_BASE_URLS=
 
-# The proxy's source IP *as the container sees it*. With the proxy on the host
-# talking to the published 127.0.0.1:8080, that is the compose network gateway:
-#   docker network inspect brainkb_mcp_default \
-#     --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'      # e.g. 172.18.0.1
+# The proxy's source address *as the container sees it*. Exact IPs or CIDRs.
+#   * ALB straight to this instance — the ALB's subnet CIDRs (see below)
+#   * proxy on the host, published 127.0.0.1:8080 — the compose network gateway:
+#       docker network inspect brainkb_mcp_default \
+#         --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'   # e.g. 172.18.0.1
 # Without this, every caller shares one rate-limit bucket.
-MCP_TRUSTED_PROXIES=172.18.0.1
+MCP_TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24
+
+# Loopback publishing (the default) is unreachable from an ALB. Set this when the
+# ALB forwards to the instance, and allow TCP 8080 only from the ALB's SG.
+MCP_BIND_ADDR=0.0.0.0
 
 # File ingest stays DISABLED (paths resolve on the server's filesystem). Set
 # MCP_INGEST_ROOT only if you want it, and only to a dedicated upload dir.
@@ -362,10 +367,28 @@ The proxy must set the forwarding header from what *it* observed —
 `X-Real-IP $remote_addr`). The MCP reads the **rightmost** `X-Forwarded-For`
 entry, so anything a client prepends itself is ignored.
 
-With an ALB in front of ECS instead, the peer is an ALB ENI private IP, and those
-change as the ALB scales — enumerate them
-(`aws ec2 describe-network-interfaces --filters Name=description,Values='ELB app/<lb-name>/*' --query 'NetworkInterfaces[].PrivateIpAddress'`)
-and re-check after scaling events, or accept that limits key on the ALB.
+**No host-side proxy? Then the ALB is the proxy.** Its source addresses are ENI IPs
+in the load-balancer subnets, and AWS adds or replaces those ENIs as the ALB
+scales — so trust the **subnet CIDRs**, not a pinned IP list that will silently
+stop matching:
+
+```bash
+aws ec2 describe-subnets --query 'Subnets[].CidrBlock' --output text \
+  --subnet-ids $(aws elbv2 describe-load-balancers --names <lb-name> \
+    --query 'LoadBalancers[0].AvailabilityZones[].SubnetId' --output text)
+```
+
+The ALB also has to *reach* the container, and the compose default publishes on
+`127.0.0.1` — loopback, which only a proxy on the same host can use. Set
+`MCP_BIND_ADDR=0.0.0.0` and make the **security group** the wall: TCP 8080 from the
+ALB's security group only. This endpoint is plaintext and does no transport auth, so
+an open 8080 is an open MCP — and note Docker's iptables rules bypass host firewalls
+like `ufw`, which makes the security group the only boundary that actually holds.
+
+Degradation is fail-safe in both directions: a wrong or stale entry means
+`X-Forwarded-For` is ignored and limits key on the proxy (everyone shares one
+bucket) — never that a forged header is believed. Unparseable entries are reported
+at startup and not trusted.
 
 ### Credentials: local vs remote (important)
 
