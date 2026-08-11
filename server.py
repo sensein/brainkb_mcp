@@ -49,8 +49,10 @@ or returned to the model.
 
 from __future__ import annotations
 
+import html
 import ipaddress
 import os
+import re
 import sys
 import threading
 import time
@@ -1479,6 +1481,79 @@ def brainkb_create_permission(name: str, resource: str, action: str, description
     via the usermanagement role-permissions API."""
     return _um("POST", "/api/admin/permissions",
                json={"name": name, "resource": resource, "action": action, "description": description})
+
+
+# --------------------------------------------------------------------------- #
+# Public HTTP routes (landing page + health check)
+# --------------------------------------------------------------------------- #
+# /mcp is the protocol endpoint and answers a browser GET with
+# "Not Acceptable: Client must accept text/event-stream" — correct, but it looks
+# like a failure to anyone who opens the host in a browser, and / answers 404.
+# These two routes exist so the host explains itself. custom_route handlers are
+# deliberately UNAUTHENTICATED (see FastMCP.custom_route), so they must disclose
+# nothing about the deployment: no backend URLs, no versions, no config, no
+# request echo beyond an escaped hostname.
+
+_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$")
+
+
+def _self_host(request: Any) -> str:
+    """Hostname to show in the sample command, from the Host header.
+
+    Validated against a strict charset and HTML-escaped at the call site: Host is
+    caller-controlled, so an unvalidated value would be reflected markup.
+    """
+    host = (request.headers.get("host") or "").split(",")[0].strip()
+    return host if _HOST_RE.match(host) else "mcp.brainkb.org"
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def _landing(request: Any) -> Any:
+    from starlette.responses import HTMLResponse
+
+    host = html.escape(_self_host(request))
+    body = f"""<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BrainKB MCP</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
+         max-width: 46rem; margin: 4rem auto; padding: 0 1.25rem; }}
+  code, pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }}
+  pre {{ padding: .85rem 1rem; border-radius: .5rem; overflow-x: auto;
+        background: color-mix(in srgb, currentColor 8%, transparent); }}
+  h1 {{ font-size: 1.5rem; margin-bottom: .25rem; }}
+  .sub {{ opacity: .7; margin-top: 0; }}
+</style>
+<h1>BrainKB MCP</h1>
+<p class="sub">Model Context Protocol server for the BrainKB knowledge base.</p>
+<p>This is an API host, not a web app. The protocol endpoint is
+<code>/mcp</code> and speaks MCP over streamable HTTP — it is meant for an MCP
+client, not a browser.</p>
+<p>Register it with Claude Code:</p>
+<pre>claude mcp add --scope user --transport http brainkb https://{host}/mcp</pre>
+<p>Each caller authenticates <strong>per request</strong> with their own BrainKB
+credential — an <code>Authorization: Bearer</code> header, or a Personal Access
+Token via the login tools. There is no shared or ambient identity.</p>
+<p>Opening <code>/mcp</code> in a browser returns
+<code>Not Acceptable: Client must accept text/event-stream</code>. That is the
+endpoint working correctly: a browser GET sends no
+<code>Accept: text/event-stream</code>, so the server refuses it.</p>
+"""
+    return HTMLResponse(body, headers={"Cache-Control": "public, max-age=300"})
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def _healthz(request: Any) -> Any:
+    """Liveness only — deliberately does NOT probe the backend.
+
+    A health check that called the query_service would let anyone use this
+    endpoint to hammer it, and would flap this service on a backend blip.
+    """
+    from starlette.responses import PlainTextResponse
+
+    return PlainTextResponse("ok\n", headers={"Cache-Control": "no-store"})
 
 
 def _startup_warnings() -> None:

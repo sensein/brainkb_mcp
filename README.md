@@ -314,8 +314,21 @@ docker push <acct>.dkr.ecr.<region>.amazonaws.com/brainkb-mcp:latest
 3. Front it with an **Application Load Balancer terminating TLS**; target group →
    container port 8080. Route53 `mcp.brainkb.org` → ALB. This is the registry
    remote URL `https://mcp.brainkb.org/mcp`.
-4. Target-group **health check**: TCP on 8080, or HTTP `GET /mcp` with a success
-   matcher of `400-499` (a bare GET returns 406 — that still proves liveness).
+4. Target-group **health check**: HTTP `GET /healthz` with the default `200`
+   matcher. It is liveness only — it deliberately does not probe the query_service,
+   so a backend blip won't cycle healthy MCP tasks, and nobody can use the health
+   endpoint to hammer the backend. (TCP on 8080 also works; `GET /mcp` with a
+   `400-499` matcher works too, since a bare GET returns 406.)
+
+Two public, unauthenticated routes exist for humans and load balancers:
+
+| Route | Response |
+|-------|----------|
+| `GET /` | Landing page: what the host is, the `claude mcp add` command, and why `/mcp` returns 406 in a browser |
+| `GET /healthz` | `200` `ok` — liveness for the target group |
+
+Neither discloses configuration (no backend URLs, versions, or request echo beyond
+a validated, HTML-escaped `Host`), because both are reachable without credentials.
 
 Notes for the ALB:
 - **Auth pass-through**: the ALB forwards the `Authorization` header by default —
