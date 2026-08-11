@@ -151,7 +151,7 @@ second backend you genuinely own:
 # pair each backend with its usermanagement URL — the :8010 -> :8004 convention
 # never applies to an https host, so an unpaired https entry has no way to reach
 # usermanagement and the admin/login tools will fail against it
-MCP_ALLOWED_BASE_URLS=https://queryservice.brainkb.org=https://usermanagement.brainkb.org
+MCP_ALLOWED_BASE_URLS=https://queryservice.example.org=https://usermanagement.example.org
 ```
 
 Never list the MCP's own hostname (`mcp.brainkb.org`): it is this server, not a

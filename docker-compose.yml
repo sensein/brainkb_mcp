@@ -32,7 +32,7 @@ services:
       # credentials get sent. Empty is the tightest setting and correct when the
       # stack is co-located (below). Pair each extra backend with its usermanagement
       # URL, since the :8010 -> :8004 convention never applies to an https host:
-      #   MCP_ALLOWED_BASE_URLS: https://queryservice.brainkb.org=https://usermanagement.brainkb.org
+      #   MCP_ALLOWED_BASE_URLS: https://queryservice.example.org=https://usermanagement.example.org
       # Never list mcp.brainkb.org — that is this server, not a backend.
       MCP_ALLOWED_BASE_URLS: ${MCP_ALLOWED_BASE_URLS:-}
       # IPs of the reverse proxy in front of this container. Required for

@@ -22,7 +22,7 @@ Configuration (env, all optional):
 Hardening knobs for the hosted (streamable-http) remote:
   MCP_ALLOWED_BASE_URLS    Comma-separated backends a caller may target, each
                            optionally paired with its usermanagement URL:
-                           'https://queryservice.brainkb.org=https://usermanagement.brainkb.org'.
+                           'https://queryservice.example.org=https://usermanagement.example.org'.
                            BRAINKB_URL is always allowed. Anything else is
                            refused — the base URL is the destination of requests
                            that carry credentials, so an arbitrary value is both
@@ -357,7 +357,7 @@ class _NotAuthed(RuntimeError):
 #
 # MCP_ALLOWED_BASE_URLS is a comma-separated list of query_service base URLs, each
 # optionally paired with its usermanagement URL:
-#     MCP_ALLOWED_BASE_URLS=https://queryservice.brainkb.org=https://usermanagement.brainkb.org,http://localhost:8011
+#     MCP_ALLOWED_BASE_URLS=https://queryservice.example.org=https://usermanagement.example.org,http://localhost:8011
 
 def _norm_base(u: Optional[str]) -> str:
     return (u or "").strip().rstrip("/")
@@ -464,7 +464,7 @@ def _um_base(base: str) -> str:
 
     `base` must already have passed _allowed_base(). The port rewrite below is only
     a convenience for the dev layout (:8010 -> :8004); it cannot be relied on for a
-    real deployment (e.g. https://queryservice.brainkb.org has no :8010, and the old code
+    real deployment (e.g. https://queryservice.example.org has no :8010, and the old code
     silently sent usermanagement traffic — PAT exchanges, admin calls — to the
     query_service host instead). Configure the pairing explicitly there.
     """
@@ -975,8 +975,10 @@ def brainkb_logout() -> str:
 
 @mcp.tool()
 def brainkb_whoami() -> Dict[str, Any]:
-    """Report the current caller's auth state (base URL, email, authenticated, and
-    when the cached session expires)."""
+    """Report the current caller's auth state (email, authenticated, and when the
+    cached session expires). When signed in it also returns base_url — the backend
+    THIS SERVER talks to, which on a hosted deployment is an internal address and
+    says nothing about the caller's own machine."""
     # Rate-limited like a read: resolving auth can trigger a token exchange against
     # the backend, so an unmetered whoami is a request amplifier.
     if not _rate_ok("read", _RL_READ):
@@ -990,9 +992,21 @@ def brainkb_whoami() -> Dict[str, Any]:
             if exp:
                 out["session_expires_in_min"] = max(0, round((float(exp) - time.time()) / 60))
         return out
-    except _NotAuthed as e:
-        return {"base_url": _DEFAULT_URL, "email": None, "authenticated": False,
-                "hint": "Session may have expired — log in again (brainkb_login / brainkb_globus_login)."}
+    except _NotAuthed:
+        # No base_url here. It is the SERVER's backend, and on the hosted remote it
+        # is an internal address (host.docker.internal:8010) — handing that to an
+        # anonymous caller discloses deployment topology, and assistants misread it
+        # as "the user is pointed at their own local stack" and warn about the wrong
+        # thing. The hint is a single instruction rather than a menu: from a cold
+        # start OAuth is the only path that works, so offering a choice of methods
+        # just costs the user a round trip.
+        return {"email": None, "authenticated": False,
+                "hint": ("Not signed in. Call brainkb_globus_login() and give the "
+                         "user the URL it returns; they sign in and paste back the "
+                         "short code for brainkb_finish_login(code). Then mint a "
+                         "PAT with brainkb_create_token(name, days) so the next "
+                         "session needs no browser. Do not ask the user to choose "
+                         "an auth method, and do not ask for a password.")}
 
 
 # --------------------------------------------------------------------------- #
