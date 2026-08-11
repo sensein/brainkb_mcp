@@ -27,10 +27,11 @@ Hardening knobs for the hosted (streamable-http) remote:
                            refused — the base URL is the destination of requests
                            that carry credentials, so an arbitrary value is both
                            SSRF and credential exfiltration.
-  MCP_TRUSTED_PROXIES      Proxy IPs whose X-Forwarded-For may be believed. Empty
-                           by default; an unvalidated forwarding header lets a
-                           caller mint a new identity per request and evade every
-                           rate limit.
+  MCP_TRUSTED_PROXIES      Proxy IPs or CIDR blocks whose X-Forwarded-For may be
+                           believed. Empty by default; an unvalidated forwarding
+                           header lets a caller mint a new identity per request and
+                           evade every rate limit. Prefer CIDRs behind an ALB — its
+                           ENI addresses change when it scales.
   MCP_INGEST_ROOT          Directory brainkb_ingest_files may read from. File
                            ingest is disabled on the remote unless this is set,
                            because paths resolve on the SERVER's filesystem.
@@ -48,6 +49,7 @@ or returned to the model.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import sys
 import threading
@@ -201,7 +203,45 @@ _RL_MAX_KEYS = _int_env("MCP_RATELIMIT_MAX_KEYS", 20000)
 # including the brute-force bucket) and lets it pin a VICTIM's IP to exhaust their
 # quota. Set MCP_TRUSTED_PROXIES to your ALB/nginx source IPs when deployed behind
 # one; until then the socket peer — which cannot be forged — is used.
-_TRUSTED_PROXIES = {p.strip() for p in os.getenv("MCP_TRUSTED_PROXIES", "").split(",") if p.strip()}
+#
+# Entries are exact IPs or CIDR blocks. CIDR matters for an ALB: its source
+# addresses are ENI IPs in the load-balancer subnets and they CHANGE as the ALB
+# scales, so pinning exact IPs silently degrades to "all callers share one bucket"
+# the next time AWS adds an ENI. Give the ALB subnet CIDRs instead.
+def _parse_trusted_proxies() -> Tuple[set, List[Any], List[str]]:
+    exact: set = set()
+    nets: List[Any] = []
+    bad: List[str] = []
+    for p in os.getenv("MCP_TRUSTED_PROXIES", "").split(","):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            if "/" in p:
+                nets.append(ipaddress.ip_network(p, strict=False))
+            else:
+                exact.add(str(ipaddress.ip_address(p)))
+        except ValueError:
+            bad.append(p)  # reported at startup; never silently trusted
+    return exact, nets, bad
+
+
+_TRUSTED_PROXIES, _TRUSTED_NETS, _TRUSTED_BAD = _parse_trusted_proxies()
+
+
+def _peer_trusted(peer: Optional[str]) -> bool:
+    """True if this socket peer is a configured reverse proxy."""
+    if not peer:
+        return False
+    if peer in _TRUSTED_PROXIES:
+        return True
+    if not _TRUSTED_NETS:
+        return False
+    try:
+        ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TRUSTED_NETS)
 
 _RL_LOCK = threading.Lock()
 _RL_BUCKETS: Dict[Tuple[str, str], list] = {}  # (client_id, bucket) -> [window, count]
@@ -230,7 +270,7 @@ def _client_id() -> str:
     leftmost entry is whatever the client chose to send and is trivially spoofed.
     """
     peer = _peer_ip()
-    if peer and peer in _TRUSTED_PROXIES:
+    if _peer_trusted(peer):
         hdrs = _request_headers()
         xff = hdrs.get("x-forwarded-for", "")
         if xff:
@@ -1457,10 +1497,13 @@ def _startup_warnings() -> None:
         else:
             warn("BRAINKB_TOKEN is set but IGNORED on this transport (it would be a "
                  "shared fallback identity). Callers must authenticate per request.")
-    if not _TRUSTED_PROXIES:
+    if _TRUSTED_BAD:
+        warn(f"MCP_TRUSTED_PROXIES has unparseable entries {_TRUSTED_BAD} — they are "
+             "NOT trusted. Use plain IPs or CIDR blocks (e.g. 10.0.1.0/24).")
+    if not _TRUSTED_PROXIES and not _TRUSTED_NETS:
         warn("MCP_TRUSTED_PROXIES is empty — X-Forwarded-For is ignored and rate "
              "limits key on the socket peer. Behind a proxy that means all callers "
-             "share one bucket; set it to your proxy's IP(s).")
+             "share one bucket; set it to your proxy's IP(s) or subnet CIDR(s).")
     if _INGEST_ROOT:
         warn(f"brainkb_ingest_files may read from {_INGEST_ROOT!r} on the SERVER's "
              "filesystem. Ensure it holds nothing callers shouldn't retrieve.")

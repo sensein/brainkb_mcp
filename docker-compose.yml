@@ -12,11 +12,17 @@ services:
     image: brainkb-mcp:local
     container_name: brainkb-mcp
     ports:
-      # Bound to loopback: the MCP speaks PLAINTEXT http and performs no
+      # Loopback by DEFAULT: the MCP speaks PLAINTEXT http and performs no
       # transport-level authentication, so it must not be reachable directly.
       # Terminate TLS in the reverse proxy in front of it and let that be the only
-      # ingress. Change to "8080:8080" only if nothing else can reach the host.
-      - "127.0.0.1:8080:8080"
+      # ingress.
+      #
+      # Loopback only works when the proxy runs on this host. An ALB forwarding
+      # straight to the instance cannot reach 127.0.0.1 — set MCP_BIND_ADDR=0.0.0.0
+      # in .env for that, and restrict TCP 8080 to the ALB's security group. Docker
+      # publishes via iptables and bypasses host firewalls (ufw), so the security
+      # group is the only thing standing in front of an unauthenticated endpoint.
+      - "${MCP_BIND_ADDR:-127.0.0.1}:8080:8080"
     environment:
       MCP_TRANSPORT: streamable-http
       MCP_HOST: 0.0.0.0
