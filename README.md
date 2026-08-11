@@ -142,10 +142,20 @@ POST `BRAINKB_TOKEN` to that host). Only `BRAINKB_URL` and entries in
 `MCP_ALLOWED_BASE_URLS` are honoured; anything else is refused with a clear error.
 Loopback is additionally allowed under stdio, where the caller is the local user.
 
+Leaving it **unset is the tightest setting**, and is the right answer when the MCP
+runs on the same host as the BrainKB stack (`BRAINKB_URL=http://host.docker.internal:8010`)
+— that host is then the only backend any caller can reach. Add entries only for a
+second backend you genuinely own:
+
 ```bash
-# pair each backend with its usermanagement URL when :8010 -> :8004 doesn't apply
-MCP_ALLOWED_BASE_URLS=https://api.brainkb.org=https://users.brainkb.org
+# pair each backend with its usermanagement URL — the :8010 -> :8004 convention
+# never applies to an https host, so an unpaired https entry has no way to reach
+# usermanagement and the admin/login tools will fail against it
+MCP_ALLOWED_BASE_URLS=https://queryservice.brainkb.org=https://usermanagement.brainkb.org
 ```
+
+Never list the MCP's own hostname (`mcp.brainkb.org`): it is this server, not a
+backend, so it would point credentialed calls back at itself.
 
 **File ingest resolves paths on the SERVER.** `brainkb_ingest_files(paths)` opens
 those paths in the *MCP process*, not on the caller's machine. Over stdio that's
@@ -314,6 +324,48 @@ Notes for the ALB:
   timeout** (e.g. 300s) so streams aren't cut. Enable sticky sessions if you rely
   on per-session `brainkb_login` rather than header auth.
 - Run it behind TLS only — tokens must not travel over plain HTTP.
+
+### Hardened `.env` for a single-host (EC2) deployment
+
+When the MCP container and the BrainKB stack share one instance and a reverse
+proxy terminating TLS for `mcp.brainkb.org` is the only ingress:
+
+```bash
+# Backends — co-located stack, reached via the host gateway (not `localhost`,
+# which inside the container is the container). This is also the ONLY backend
+# any caller can reach, which is what keeps the allowlist below empty.
+BRAINKB_URL=http://host.docker.internal:8010
+USERMANAGEMENT_URL=http://host.docker.internal:8004
+
+# Backend allowlist: leave UNSET. Only BRAINKB_URL is honoured, so
+# X-BrainKB-Base-URL / base_url cannot redirect credentials anywhere.
+# MCP_ALLOWED_BASE_URLS=
+
+# The proxy's source IP *as the container sees it*. With the proxy on the host
+# talking to the published 127.0.0.1:8080, that is the compose network gateway:
+#   docker network inspect brainkb_mcp_default \
+#     --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'      # e.g. 172.18.0.1
+# Without this, every caller shares one rate-limit bucket.
+MCP_TRUSTED_PROXIES=172.18.0.1
+
+# File ingest stays DISABLED (paths resolve on the server's filesystem). Set
+# MCP_INGEST_ROOT only if you want it, and only to a dedicated upload dir.
+# MCP_INGEST_ROOT=
+
+# No ambient identity: BRAINKB_TOKEN is ignored here, and must stay unset in the
+# image/compose env. Callers authenticate per request.
+# MCP_ALLOW_SHARED_IDENTITY=false
+```
+
+The proxy must set the forwarding header from what *it* observed —
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (or
+`X-Real-IP $remote_addr`). The MCP reads the **rightmost** `X-Forwarded-For`
+entry, so anything a client prepends itself is ignored.
+
+With an ALB in front of ECS instead, the peer is an ALB ENI private IP, and those
+change as the ALB scales — enumerate them
+(`aws ec2 describe-network-interfaces --filters Name=description,Values='ELB app/<lb-name>/*' --query 'NetworkInterfaces[].PrivateIpAddress'`)
+and re-check after scaling events, or accept that limits key on the ALB.
 
 ### Credentials: local vs remote (important)
 

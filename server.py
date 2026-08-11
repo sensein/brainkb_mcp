@@ -22,7 +22,7 @@ Configuration (env, all optional):
 Hardening knobs for the hosted (streamable-http) remote:
   MCP_ALLOWED_BASE_URLS    Comma-separated backends a caller may target, each
                            optionally paired with its usermanagement URL:
-                           'https://api.brainkb.org=https://users.brainkb.org'.
+                           'https://queryservice.brainkb.org=https://usermanagement.brainkb.org'.
                            BRAINKB_URL is always allowed. Anything else is
                            refused — the base URL is the destination of requests
                            that carry credentials, so an arbitrary value is both
@@ -315,7 +315,7 @@ class _NotAuthed(RuntimeError):
 #
 # MCP_ALLOWED_BASE_URLS is a comma-separated list of query_service base URLs, each
 # optionally paired with its usermanagement URL:
-#     MCP_ALLOWED_BASE_URLS=https://api.brainkb.org=https://users.brainkb.org,http://localhost:8011
+#     MCP_ALLOWED_BASE_URLS=https://queryservice.brainkb.org=https://usermanagement.brainkb.org,http://localhost:8011
 
 def _norm_base(u: Optional[str]) -> str:
     return (u or "").strip().rstrip("/")
@@ -422,7 +422,7 @@ def _um_base(base: str) -> str:
 
     `base` must already have passed _allowed_base(). The port rewrite below is only
     a convenience for the dev layout (:8010 -> :8004); it cannot be relied on for a
-    real deployment (e.g. https://api.brainkb.org has no :8010, and the old code
+    real deployment (e.g. https://queryservice.brainkb.org has no :8010, and the old code
     silently sent usermanagement traffic — PAT exchanges, admin calls — to the
     query_service host instead). Configure the pairing explicitly there.
     """
