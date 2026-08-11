@@ -23,22 +23,29 @@ services:
       MCP_PORT: "8080"
       # Backends a caller may target via X-BrainKB-Base-URL / base_url. BRAINKB_URL
       # is always allowed; everything else is refused, because that URL is where
-      # credentials get sent. Pair each with its usermanagement URL when the
-      # :8010 -> :8004 convention doesn't apply:
-      #   MCP_ALLOWED_BASE_URLS: https://api.brainkb.org=https://users.brainkb.org
+      # credentials get sent. Empty is the tightest setting and correct when the
+      # stack is co-located (below). Pair each extra backend with its usermanagement
+      # URL, since the :8010 -> :8004 convention never applies to an https host:
+      #   MCP_ALLOWED_BASE_URLS: https://queryservice.brainkb.org=https://usermanagement.brainkb.org
+      # Never list mcp.brainkb.org — that is this server, not a backend.
       MCP_ALLOWED_BASE_URLS: ${MCP_ALLOWED_BASE_URLS:-}
       # IPs of the reverse proxy in front of this container. Required for
       # per-client rate limiting — without it X-Forwarded-For is ignored (it is
       # caller-controlled and forgeable) and every request keys on the proxy.
       MCP_TRUSTED_PROXIES: ${MCP_TRUSTED_PROXIES:-}
       # Directory brainkb_ingest_files may read. Paths resolve on the SERVER's
-      # filesystem, so file ingest stays disabled here unless you set this.
+      # filesystem, so file ingest stays disabled here unless you set this — and
+      # the path is INSIDE the container, so uncomment the volume mount below too.
       MCP_INGEST_ROOT: ${MCP_INGEST_ROOT:-}
       # The BrainKB stack runs on the SAME host (EC2), publishing :8010/:8004.
       # A container's own `localhost` isn't the host, so we reach them via
       # host.docker.internal (mapped below for Linux). Overridable from .env.
       BRAINKB_URL: ${BRAINKB_URL:-http://host.docker.internal:8010}
       USERMANAGEMENT_URL: ${USERMANAGEMENT_URL:-http://host.docker.internal:8004}
+    # Only needed if you set MCP_INGEST_ROOT (remote file ingest). The container
+    # path must match MCP_INGEST_ROOT exactly; ro so ingest can't write into it.
+    # volumes:
+    #   - /srv/brainkb-ingest:/srv/brainkb-ingest:ro
     # Make host.docker.internal resolve to the host on Linux/EC2 (it's built in on
     # macOS/Windows Docker Desktop). This is what lets the MCP reach the
     # co-located query_service/usermanagement without host networking, keeping
