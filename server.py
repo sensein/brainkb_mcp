@@ -704,10 +704,22 @@ def _seg(value: str) -> str:
     return quote((value or "").strip(), safe="")
 
 
-def _path_ok(path: str) -> bool:
+def _path_ok(path: str, *, allow_trailing_slash: bool = False) -> bool:
     """False if a request path contains an empty or dot segment — i.e. something
-    that would traverse to a different endpoint than the tool intended."""
-    return not any(p in ("", ".", "..") for p in path.split("/")[1:])
+    that would traverse to a different endpoint than the tool intended.
+
+    allow_trailing_slash is for the handful of backend routes that are DECLARED
+    with a trailing slash (e.g. query_service's '/api/query/sparql/'), where the
+    final empty segment is part of the literal template rather than an
+    interpolated value. It is opt-in per call, not the default, because a trailing
+    empty segment from an *interpolated* value is exactly the dangerous case:
+    f"/api/auth/tokens/{_seg(token_id)}" with an empty id would silently address
+    the collection instead of one item.
+    """
+    segs = path.split("/")[1:]
+    if allow_trailing_slash and segs and segs[-1] == "":
+        segs = segs[:-1]
+    return not any(p in ("", ".", "..") for p in segs)
 
 
 _BAD_PATH = {"error": True, "status_code": 400,
@@ -727,8 +739,9 @@ def _result(resp: httpx.Response) -> Any:
     return {"error": True, "status_code": resp.status_code, "detail": body}
 
 
-def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    if not _path_ok(path):
+def _get(path: str, params: Optional[Dict[str, Any]] = None, *,
+         allow_trailing_slash: bool = False) -> Any:
+    if not _path_ok(path, allow_trailing_slash=allow_trailing_slash):
         return dict(_BAD_PATH)
     if not _rate_ok("read", _RL_READ):
         return _rl_error("read", _RL_READ)
@@ -1272,8 +1285,13 @@ def brainkb_list_registered_graphs() -> Any:
 
 @mcp.tool()
 def brainkb_sparql(sparql_query: str) -> Any:
-    """Run an arbitrary SPARQL query (requires the 'admin' scope)."""
-    return _get("/api/query/sparql/", params={"sparql_query": sparql_query})
+    """Run an arbitrary SPARQL query. Requires an Admin/SuperAdmin role (the
+    sparql_admin capability) — for ordinary questions prefer brainkb_search,
+    brainkb_read_space, or the provenance/delta tools, which need no admin role."""
+    # query_service declares this route WITH a trailing slash, so the guard has to
+    # tolerate the final empty segment here (it is literal, not interpolated).
+    return _get("/api/query/sparql/", params={"sparql_query": sparql_query},
+                allow_trailing_slash=True)
 
 
 # --------------------------------------------------------------------------- #
