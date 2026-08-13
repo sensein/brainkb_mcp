@@ -35,6 +35,9 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_globus_login(provider?)` | Start OAuth (Globus/ORCID/GitHub) login → returns a URL to open; browser shows a one-time code |
 | `brainkb_finish_login(code)` | Complete OAuth login by pasting the code the browser showed |
 | `brainkb_whoami()` / `brainkb_logout()` | Session/auth info / forget this session's token |
+| `brainkb_use_token(pat)` | Authenticate with a Personal Access Token — no browser, no password |
+| `brainkb_create_token(name, days?)` | Mint a PAT (shown **once**). The recommended credential; see the lifetime table below |
+| `brainkb_list_tokens()` / `brainkb_revoke_token(token_id)` | List your PATs / revoke one instantly |
 
 ### Spaces
 | Tool | What it does |
