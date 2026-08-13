@@ -49,6 +49,7 @@ or returned to the model.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import ipaddress
 import os
@@ -1170,27 +1171,68 @@ def _ingest_path(p: str) -> str:
                 f"{p!r} is outside the permitted ingest directory (MCP_INGEST_ROOT)."
             )
     elif _IS_REMOTE:
+        # Do NOT suggest brainkb_ingest_text here. This message used to, and the
+        # advice is actively harmful for a file: a caller followed it, tried to
+        # reproduce a 2.7 MB Turtle export through the tool argument, split it to
+        # fit, and came within one call of writing silently-detached triples into an
+        # append-only graph (the first splitter alone lost 2,070 triples, and
+        # splitting at all breaks blank-node identity across calls).
         raise PermissionError(
-            "File ingest is disabled on the hosted remote because file paths are "
-            "read from the SERVER's filesystem, not yours. Use brainkb_ingest_text "
-            "instead, or ask the operator to set MCP_INGEST_ROOT to a directory "
-            "that may be ingested from."
+            "File ingest is disabled on the hosted remote: paths are read from the "
+            "SERVER's filesystem, not yours, so this server cannot see your file. "
+            "Ask the operator to set MCP_INGEST_ROOT to an ingest directory (plus "
+            "the matching bind mount) and place the file there. Do NOT re-type the "
+            "file's RDF into brainkb_ingest_text: ingest is append-only, dense "
+            "Turtle does not survive transcription intact, and splitting it across "
+            "calls silently breaks blank nodes. brainkb_ingest_text is for RDF you "
+            "authored in-session, and takes sha256= so even that is checked."
         )
     if not os.path.isfile(rp):
         raise PermissionError(f"{p!r} is not a regular file.")
     return rp
 
 @mcp.tool()
-def brainkb_ingest_text(named_graph_iri: str, data: str) -> Any:
+def brainkb_ingest_text(named_graph_iri: str, data: str,
+                        sha256: str = "", expected_bytes: int = 0) -> Any:
     """Ingest raw RDF text (Turtle / N-Triples / JSON-LD, auto-detected) into a
     named graph. Returns a job_id; ingestion runs in the background — poll with
     brainkb_job_status. The graph must be registered (see brainkb_add_space_graph)
-    and the caller must have write access to its space."""
+    and the caller must have write access to its space.
+
+    `sha256` / `expected_bytes` are an integrity contract, and you should use them
+    whenever the RDF came from a file. Ingest is append-only — no delete for
+    triples, no unregister for a graph — so RDF that arrives here mangled is
+    permanent. Because `data` is a string, it passes through the caller's context,
+    where dense Turtle is exactly what gets silently altered: ligatures, Greek
+    letters, embedded newlines, escaped quotes. Declare the digest of the bytes you
+    MEANT to send (`shasum -a 256 file.ttl`) and this refuses the write on any
+    mismatch, turning an unrecoverable corruption into a clean rejection.
+    """
     payload = data.encode("utf-8")
+    if expected_bytes and len(payload) != expected_bytes:
+        return {"error": True, "status_code": 400,
+                "detail": (f"Byte-count mismatch: declared {expected_bytes}, "
+                           f"received {len(payload)}. Nothing was written. The "
+                           "payload was truncated or altered in transit — send the "
+                           "file's bytes without passing them through a model, or "
+                           "use file ingest.")}
+    if sha256:
+        got = hashlib.sha256(payload).hexdigest()
+        want = sha256.strip().lower()
+        if got != want:
+            return {"error": True, "status_code": 400,
+                    "detail": (f"Digest mismatch: declared {want}, received {got} "
+                               f"({len(payload)} bytes). Nothing was written — this "
+                               "is the guard working. Do not retry by re-typing the "
+                               "RDF; put the file where the server can read it "
+                               "(MCP_INGEST_ROOT) and use brainkb_ingest_files.")}
     if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
         return {"error": True, "status_code": 413,
                 "detail": (f"Payload too large ({len(payload)} bytes > "
-                           f"{_MAX_INGEST_BYTES}). Split it or use file ingest.")}
+                           f"{_MAX_INGEST_BYTES}). Use file ingest — do NOT split "
+                           "the RDF across calls: blank-node labels are scoped to "
+                           "one document, so a bnode shared by two calls becomes "
+                           "two distinct nodes and the triples silently detach.")}
     return _post("/api/insert/raw/knowledge-graph-triples",
                  params={"user_id": _me(), "named_graph_iri": named_graph_iri},
                  content=payload, ctype="text/plain")
