@@ -1479,8 +1479,15 @@ def _ingest_path(p: str) -> str:
         raise PermissionError(
             "File ingest is disabled on the hosted remote: paths are read from the "
             "SERVER's filesystem, not yours, so this server cannot see your file. "
-            "Ask the operator to set MCP_INGEST_ROOT to an ingest directory (plus "
-            "the matching bind mount) and place the file there. Do NOT re-type the "
+            "Upload it instead — no operator change needed:\n"
+            "  curl -H \"Authorization: Bearer $BRAINKB_TOKEN\" "
+            "--data-binary @file.ttl \\\n"
+            "       \"https://<this-host>/upload?filename=file.ttl&graph=<graph_iri>\"\n"
+            "That streams the bytes from your disk and the server ingests them; poll "
+            "brainkb_upload_status(upload_id). (Omit &graph to stage it and call "
+            "brainkb_ingest_upload yourself.) Alternatively the operator can set "
+            "MCP_INGEST_ROOT plus a bind mount and place the file there. Do NOT "
+            "re-type the "
             "file's RDF into brainkb_ingest_text: ingest is append-only, dense "
             "Turtle does not survive transcription intact, and splitting it across "
             "calls silently breaks blank nodes. brainkb_ingest_text is for RDF you "
@@ -1528,7 +1535,10 @@ def brainkb_ingest_text(named_graph_iri: str, data: str,
     if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
         return {"error": True, "status_code": 413,
                 "detail": (f"Payload too large ({len(payload)} bytes > "
-                           f"{_MAX_INGEST_BYTES}). Use file ingest — do NOT split "
+                           f"{_MAX_INGEST_BYTES}). Upload the file instead — "
+                           "POST /upload with 'Authorization: Bearer <token>' and "
+                           "--data-binary @file, then brainkb_ingest_upload (or add "
+                           "&graph=<iri> to have the server submit it). Do NOT split "
                            "the RDF across calls: blank-node labels are scoped to "
                            "one document, so a bnode shared by two calls becomes "
                            "two distinct nodes and the triples silently detach.")}
@@ -2321,6 +2331,16 @@ client, not a browser.</p>
 <p>Each caller authenticates <strong>per request</strong> with their own BrainKB
 credential — an <code>Authorization: Bearer</code> header, or a Personal Access
 Token via the login tools. There is no shared or ambient identity.</p>
+<p><strong>Ingesting a large RDF file.</strong> MCP tool arguments are written by the
+model, so a file passed through one has to be re-typed token by token — unusable above
+a few KB, and unsafe for RDF. Stream it here instead, and the server ingests it
+through the same API the tools use:</p>
+<pre>curl -H "Authorization: Bearer $BRAINKB_TOKEN" \
+     --data-binary @review.ttl \
+     "https://{host}/upload?filename=review.ttl&amp;graph=&lt;graph_iri&gt;"</pre>
+<p>Answers <code>202</code> with an <code>upload_id</code> and ingests in the
+background. Omit <code>&amp;graph</code> to stage only, then call
+<code>brainkb_ingest_upload</code>. Up to 5&nbsp;GB per file.</p>
 <p>Opening <code>/mcp</code> in a browser returns
 <code>Not Acceptable: Client must accept text/event-stream</code>. That is the
 endpoint working correctly: a browser GET sends no
