@@ -50,6 +50,8 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | Tool | What it does |
 |------|--------------|
 | `brainkb_ingest_text(graph_iri, data, sha256?, expected_bytes?)` | Ingest raw RDF text → `job_id`. For RDF you authored in-session; declare `sha256` and the write is refused if the bytes changed in transit |
+| `brainkb_ingest_upload(graph_iri, upload_id)` | Ingest a file staged via `POST /upload` — **the route for a large local file**; the client streams the bytes, the server ingests them |
+| `brainkb_upload_status(upload_id)` / `brainkb_list_uploads()` / `brainkb_discard_upload(id)` | Track or drop staged uploads |
 | `brainkb_ingest_url(graph_iri, url, sha256?, filename?)` | **Large files on the remote.** The server fetches the URL and streams it to the ingest API — the bytes never pass through a caller's context. Needs `MCP_INGEST_URL_ALLOWLIST` |
 | `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files (TTL/JSON-LD/…) → `job_id`. Streams large uploads (up to ~5 GB/user); no byte cap, only a file-count cap |
 | `brainkb_list_jobs(limit?)` / `brainkb_job_status(job_id)` | Ingest status |
@@ -132,6 +134,11 @@ backend. Three inputs are therefore treated as hostile:
 | `MCP_ALLOWED_BASE_URLS` | *(only `BRAINKB_URL`)* | Backends a caller may select via the `X-BrainKB-Base-URL` header or a tool's `base_url` argument |
 | `MCP_TRUSTED_PROXIES` | *(empty)* | Peers whose `X-Forwarded-For` / `X-Real-IP` is believed |
 | `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` may read from |
+| `MCP_UPLOAD_ENABLED` | `true` | `POST /upload` staging endpoint (authenticated) |
+| `MCP_UPLOAD_DIR` | `<tmp>/brainkb-uploads` | where staged uploads live |
+| `MCP_UPLOAD_MAX_BYTES` | `5000000000` | 5 GB per file |
+| `MCP_UPLOAD_TOTAL_BYTES` | `20000000000` | across all staged uploads |
+| `MCP_UPLOAD_TTL_MIN` | `360` | stale uploads are swept |
 | `MCP_INGEST_URL_ALLOWLIST` | *(unset → URL ingest disabled)* | Hosts `brainkb_ingest_url` may fetch from; `.s3.amazonaws.com` matches any subdomain |
 | `MCP_MAX_INGEST_URL_BYTES` | `1000000000` | cap on a fetched body |
 | `MCP_INGEST_URL_ALLOW_HTTP` | `false` | permit a plaintext http fetch (trusted internal hosts only) |
@@ -161,17 +168,34 @@ MCP_ALLOWED_BASE_URLS=https://queryservice.example.org=https://usermanagement.ex
 Never list the MCP's own hostname (`mcp.brainkb.org`): it is this server, not a
 backend, so it would point credentialed calls back at itself.
 
-**Ingesting a large file through the remote.** Two supported routes, and both keep
-the bytes out of the caller's context:
+**Ingesting a large file through the remote.** Three routes, all of which keep the
+bytes out of the caller's context:
 
-1. `brainkb_ingest_url` — put the file behind an HTTPS URL the server can reach (an
+1. **`POST /upload` + `brainkb_ingest_upload`** — the general answer, needing nothing
+   but the credential you already have. Your client streams the file straight to the
+   server:
+
+   ```bash
+   curl -H "Authorization: Bearer $BRAINKB_TOKEN" \
+        --data-binary @review.ttl \
+        "https://mcp.brainkb.org/upload?filename=review.ttl&sha256=$(shasum -a 256 review.ttl | cut -d" " -f1)"
+   # -> 201 {"upload_id": "up_...", "bytes": 2794655, "sha256": "..."}
+   ```
+
+   then `brainkb_ingest_upload("https://brainkb.org/graph/x/", "up_...")`. Add
+   `&graph=<iri>` to the URL instead and the server submits the ingest itself,
+   answering 202 at once — upload and forget, then poll
+   `brainkb_upload_status(upload_id)`. 5 GB per file. The endpoint is authenticated
+   through the same token path as the tools, requires the `write` scope the ingest
+   API requires, and an upload can only be ingested by the identity that made it.
+2. `brainkb_ingest_url` — put the file behind an HTTPS URL the server can reach (an
    S3/GCS presigned URL, a release asset, an internal artifact store) and pass that
    URL. The server streams it to the ingest API. Requires
    `MCP_INGEST_URL_ALLOWLIST`; it is SSRF-guarded (allowlisted hosts only, private /
    loopback / link-local / metadata resolutions refused even for an allowlisted
    name, redirects not followed, byte cap, HTML-instead-of-RDF detected, optional
    `sha256` verified before anything is written).
-2. `MCP_INGEST_ROOT` + `brainkb_ingest_files` — place the file on the server host in
+3. `MCP_INGEST_ROOT` + `brainkb_ingest_files` — place the file on the server host in
    a dedicated upload dir with a matching bind mount.
 
 What NOT to do, in either case: reproduce the file's RDF into `brainkb_ingest_text`.

@@ -51,13 +51,25 @@ services:
       # Large-file ingest without touching the caller's context: the server fetches
       # the URL itself. Empty disables the tool (a server-side fetch of a supplied
       # URL is SSRF), so name the hosts you will serve files from.
+      # POST /upload: the client streams a file straight to the server, which then
+      # ingests it internally. Persist the staging dir if you want uploads to
+      # survive a restart (see the volumes entry below).
+      MCP_UPLOAD_ENABLED: ${MCP_UPLOAD_ENABLED:-true}
+      MCP_UPLOAD_DIR: ${MCP_UPLOAD_DIR:-/var/lib/brainkb-uploads}
+      MCP_UPLOAD_MAX_BYTES: ${MCP_UPLOAD_MAX_BYTES:-5000000000}
+      MCP_UPLOAD_TOTAL_BYTES: ${MCP_UPLOAD_TOTAL_BYTES:-20000000000}
+      MCP_UPLOAD_TTL_MIN: ${MCP_UPLOAD_TTL_MIN:-360}
       MCP_INGEST_URL_ALLOWLIST: ${MCP_INGEST_URL_ALLOWLIST:-}
       MCP_MAX_INGEST_URL_BYTES: ${MCP_MAX_INGEST_URL_BYTES:-1000000000}
       MCP_INGEST_URL_ALLOW_HTTP: ${MCP_INGEST_URL_ALLOW_HTTP:-false}
-    # Only needed if you set MCP_INGEST_ROOT (remote file ingest). The container
-    # path must match MCP_INGEST_ROOT exactly; ro so ingest can't write into it.
+    # First entry: only if you set MCP_INGEST_ROOT (remote file ingest) — the
+    # container path must match it exactly, and ro so ingest can't write into it.
+    # Second: persist POST /upload's staging area, so a restart mid-upload doesn't
+    # lose staged files. Without it they live in the container's temp dir, which is
+    # fine (they expire anyway) but does not survive a redeploy.
     # volumes:
     #   - /srv/brainkb-ingest:/srv/brainkb-ingest:ro
+    #   - /var/lib/brainkb-uploads:/var/lib/brainkb-uploads
     # Make host.docker.internal resolve to the host on Linux/EC2 (it's built in on
     # macOS/Windows Docker Desktop). This is what lets the MCP reach the
     # co-located query_service/usermanagement without host networking, keeping
