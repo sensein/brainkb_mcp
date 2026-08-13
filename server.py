@@ -35,6 +35,13 @@ Hardening knobs for the hosted (streamable-http) remote:
   MCP_INGEST_ROOT          Directory brainkb_ingest_files may read from. File
                            ingest is disabled on the remote unless this is set,
                            because paths resolve on the SERVER's filesystem.
+  MCP_INGEST_URL_ALLOWLIST Hosts brainkb_ingest_url may fetch from ('.s3.amazonaws.com'
+                           matches any subdomain). Empty by default, which disables
+                           the tool: a server-side fetch of a caller-supplied URL is
+                           SSRF. This is how a LARGE file is ingested on the remote —
+                           the bytes go URL -> server -> REST API, never through a
+                           caller's context, so there is nothing to transcribe and no
+                           reason to split the document.
   MCP_ALLOW_SHARED_IDENTITY  Opt in to BRAINKB_TOKEN as an ambient identity
                            (single-user HTTP deployments only).
 
@@ -1157,6 +1164,66 @@ def brainkb_add_space_graph(slug: str, named_graph_iri: str, description: str = 
 # unless MCP_INGEST_ROOT confines it to a directory.
 _INGEST_ROOT = os.getenv("MCP_INGEST_ROOT", "").strip()
 
+# --- ingest-from-URL ------------------------------------------------------- #
+# The gap this closes: on a hosted remote, brainkb_ingest_files reads the SERVER's
+# filesystem, so a file on the caller's machine cannot be ingested at all — and the
+# only alternative, retyping the RDF into brainkb_ingest_text, is a fidelity gamble
+# on an append-only store. Fetching by URL keeps the bytes entirely server-side:
+# they go URL -> this process -> the REST API, never through a model's context.
+#
+# It is also a textbook SSRF primitive, so it is off unless an operator names the
+# hosts it may fetch from, exactly like MCP_ALLOWED_BASE_URLS. Host suffixes are
+# allowed ('.s3.amazonaws.com' matches any bucket host under it).
+_INGEST_URL_HOSTS = tuple(
+    h.strip().lower().lstrip(".")
+    for h in os.getenv("MCP_INGEST_URL_ALLOWLIST", "").split(",")
+    if h.strip()
+)
+# Cap on a fetched body. The backend accepts multi-GB uploads, but an unbounded
+# fetch is a disk-exhaustion lever on a shared host.
+_MAX_INGEST_URL_BYTES = _int_env("MCP_MAX_INGEST_URL_BYTES", 1_000_000_000)
+_INGEST_URL_ALLOW_HTTP = os.getenv(
+    "MCP_INGEST_URL_ALLOW_HTTP", "false").strip().lower() in ("1", "true", "yes")
+# Suffixes the ingest endpoint understands. Used only to name the uploaded part
+# sensibly — the backend decides the real format.
+_RDF_SUFFIXES = (".ttl", ".nt", ".nq", ".n3", ".rdf", ".owl", ".xml",
+                 ".jsonld", ".json", ".trig", ".gz")
+
+
+def _host_allowed(host: str) -> bool:
+    """True if `host` is exactly an allowlisted host or sits under one."""
+    host = (host or "").lower().rstrip(".")
+    return any(host == h or host.endswith("." + h) for h in _INGEST_URL_HOSTS)
+
+
+def _public_ip(host: str) -> Optional[str]:
+    """Resolve `host` and return the reason it is NOT fetchable, or None if it is.
+
+    Every resolved address must be public. A hostname that resolves to a private,
+    loopback, link-local or reserved address is the SSRF case this exists for — it
+    is how a fetch becomes a read of the cloud metadata service (169.254.169.254),
+    a sibling container, or the backend's own admin port.
+    """
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        return f"could not resolve {host!r} ({exc})"
+    if not infos:
+        return f"could not resolve {host!r}"
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return f"{host!r} resolved to an unusable address {addr!r}"
+        if not ip.is_global or ip.is_multicast:
+            return (f"{host!r} resolves to the non-public address {addr} — refused "
+                    "(this is the SSRF case: private, loopback, link-local and "
+                    "metadata addresses are never fetched)")
+    return None
+
 
 def _ingest_path(p: str) -> str:
     """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
@@ -1236,6 +1303,144 @@ def brainkb_ingest_text(named_graph_iri: str, data: str,
     return _post("/api/insert/raw/knowledge-graph-triples",
                  params={"user_id": _me(), "named_graph_iri": named_graph_iri},
                  content=payload, ctype="text/plain")
+
+
+@mcp.tool()
+def brainkb_ingest_url(named_graph_iri: str, url: str, sha256: str = "",
+                       filename: str = "") -> Any:
+    """Ingest an RDF file that this server fetches from `url` itself.
+
+    This is how to ingest a LARGE file on the hosted remote. The bytes go
+    URL -> this server -> the ingest API and never pass through the caller's
+    context, so there is no transcription risk, no size ceiling imposed by a context
+    window, and no reason to split the document (splitting breaks blank-node
+    identity, which corrupts an append-only graph silently).
+
+    Put the file anywhere the server can reach over HTTPS — an S3/GCS presigned URL,
+    a release asset, an internal artifact store — and pass that URL. Give `sha256`
+    (`shasum -a 256 file.ttl`) whenever you can: it is verified after download and
+    before anything is written.
+
+    Returns a job_id; ingestion runs in the background — poll brainkb_job_status,
+    then reconcile brainkb_delta(job_id) against the triple count you expected.
+
+    Requires the operator to have set MCP_INGEST_URL_ALLOWLIST, because fetching an
+    arbitrary URL server-side is SSRF. Redirects are not followed: a redirect can
+    move the request to a host the allowlist never approved.
+    """
+    if not _INGEST_URL_HOSTS:
+        return {"error": True, "status_code": 403,
+                "detail": ("URL ingest is disabled: no MCP_INGEST_URL_ALLOWLIST is "
+                           "configured. Ask the operator to allowlist the host(s) "
+                           "you will serve files from (e.g. "
+                           "MCP_INGEST_URL_ALLOWLIST=.s3.amazonaws.com,files.example.org). "
+                           "Until then, the supported path for a large file is "
+                           "MCP_INGEST_ROOT + brainkb_ingest_files.")}
+    try:
+        parsed = httpx.URL(url)
+    except Exception as exc:
+        return {"error": True, "status_code": 400, "detail": f"unusable url: {exc}"}
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("https", "http"):
+        return {"error": True, "status_code": 400,
+                "detail": f"only http(s) urls may be fetched, got {scheme!r}"}
+    if scheme == "http" and not _INGEST_URL_ALLOW_HTTP:
+        return {"error": True, "status_code": 400,
+                "detail": ("refusing a plaintext http url — the fetch would be "
+                           "readable and tamperable in transit. Use https, or set "
+                           "MCP_INGEST_URL_ALLOW_HTTP=true for a trusted internal "
+                           "host.")}
+    host = parsed.host or ""
+    if not _host_allowed(host):
+        return {"error": True, "status_code": 403,
+                "detail": (f"host {host!r} is not in MCP_INGEST_URL_ALLOWLIST "
+                           f"({', '.join(_INGEST_URL_HOSTS)}). The allowlist is the "
+                           "whole security boundary here, so it is not bypassable "
+                           "per call.")}
+    bad = _public_ip(host)
+    if bad:
+        return {"error": True, "status_code": 403, "detail": bad}
+
+    name = os.path.basename(filename or parsed.path or "") or "ingest.ttl"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120]
+    if not name.lower().endswith(_RDF_SUFFIXES):
+        name += ".ttl"
+
+    import tempfile
+
+    digest = hashlib.sha256()
+    total = 0
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="brainkb-ingest-", suffix="-" + name,
+                                         delete=False) as fh:
+            tmp = fh.name
+            # Streamed, so a multi-GB file never has to fit in memory, and the cap
+            # can be enforced mid-transfer rather than after the damage.
+            with httpx.Client(timeout=_UPLOAD_TIMEOUT,
+                              follow_redirects=False) as c:
+                with c.stream("GET", url) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        return {"error": True, "status_code": 400,
+                                "detail": (f"{url} redirected to "
+                                           f"{resp.headers.get('location')!r}. "
+                                           "Redirects are not followed — pass the "
+                                           "final URL so the allowlist applies to "
+                                           "the host actually fetched.")}
+                    if resp.status_code >= 400:
+                        return {"error": True, "status_code": resp.status_code,
+                                "detail": f"fetch failed: HTTP {resp.status_code}"}
+                    ctype = (resp.headers.get("content-type") or "").lower()
+                    first = b""
+                    for chunk in resp.iter_bytes(1 << 20):
+                        if not first:
+                            first = chunk[:200]
+                        total += len(chunk)
+                        if _MAX_INGEST_URL_BYTES and total > _MAX_INGEST_URL_BYTES:
+                            return {"error": True, "status_code": 413,
+                                    "detail": (f"fetch exceeded "
+                                               f"{_MAX_INGEST_URL_BYTES} bytes "
+                                               "(MCP_MAX_INGEST_URL_BYTES)")}
+                        digest.update(chunk)
+                        fh.write(chunk)
+        if total == 0:
+            return {"error": True, "status_code": 400, "detail": "fetched 0 bytes"}
+        # A login wall or an expired presigned URL answers 200 with HTML, which the
+        # ingest job would then fail on far downstream. Catch it here, where the
+        # error can still name the cause.
+        head = first.decode("utf-8", "replace").lstrip().lower()
+        if head.startswith(("<!doctype html", "<html")) or "text/html" in ctype:
+            return {"error": True, "status_code": 400,
+                    "detail": (f"{url} returned HTML, not RDF (content-type "
+                               f"{ctype or 'unknown'}). An expired presigned URL or "
+                               "a login page is the usual cause.")}
+        got = digest.hexdigest()
+        if sha256 and got != sha256.strip().lower():
+            return {"error": True, "status_code": 400,
+                    "detail": (f"digest mismatch: declared {sha256.strip().lower()}, "
+                               f"fetched {got} ({total} bytes). Nothing was written "
+                               "— the URL is not serving the file you hashed.")}
+        with open(tmp, "rb") as fh:
+            out = _post("/api/insert/files/knowledge-graph-triples",
+                        params={"user_id": _me(),
+                                "named_graph_iri": named_graph_iri},
+                        files=[("files", (name, fh, "application/octet-stream"))],
+                        timeout=_UPLOAD_TIMEOUT)
+        if isinstance(out, dict):
+            out.setdefault("fetched", {})
+            out["fetched"] = {"url": url, "bytes": total, "sha256": got,
+                              "uploaded_as": name}
+        return out
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    except Exception as e:
+        return {"error": True, "detail": f"fetch/ingest failed: {e}"}
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 @mcp.tool()

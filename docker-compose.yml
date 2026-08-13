@@ -48,6 +48,12 @@ services:
       # host.docker.internal (mapped below for Linux). Overridable from .env.
       BRAINKB_URL: ${BRAINKB_URL:-http://host.docker.internal:8010}
       USERMANAGEMENT_URL: ${USERMANAGEMENT_URL:-http://host.docker.internal:8004}
+      # Large-file ingest without touching the caller's context: the server fetches
+      # the URL itself. Empty disables the tool (a server-side fetch of a supplied
+      # URL is SSRF), so name the hosts you will serve files from.
+      MCP_INGEST_URL_ALLOWLIST: ${MCP_INGEST_URL_ALLOWLIST:-}
+      MCP_MAX_INGEST_URL_BYTES: ${MCP_MAX_INGEST_URL_BYTES:-1000000000}
+      MCP_INGEST_URL_ALLOW_HTTP: ${MCP_INGEST_URL_ALLOW_HTTP:-false}
     # Only needed if you set MCP_INGEST_ROOT (remote file ingest). The container
     # path must match MCP_INGEST_ROOT exactly; ro so ingest can't write into it.
     # volumes:
