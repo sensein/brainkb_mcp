@@ -1208,8 +1208,44 @@ _INGEST_ROOT = os.getenv("MCP_INGEST_ROOT", "").strip()
 # `data=open("review.ttl","rb")` and pasting 2.8 MB into a tool call.
 _UPLOAD_ENABLED = os.getenv(
     "MCP_UPLOAD_ENABLED", "true").strip().lower() not in ("0", "false", "no")
-_UPLOAD_DIR = os.getenv("MCP_UPLOAD_DIR", "").strip() or os.path.join(
-    tempfile.gettempdir(), "brainkb-uploads")
+_UPLOAD_DIR_FALLBACK = os.path.join(tempfile.gettempdir(), "brainkb-uploads")
+
+
+def _resolve_upload_dir() -> Tuple[str, Optional[str]]:
+    """(usable staging directory, note about a fallback).
+
+    The configured directory may not be creatable: the image runs as uid 10001, so a
+    path like /var/lib/brainkb-uploads only exists if the Dockerfile made it (it does)
+    or a bind mount provides it with the right ownership. If neither holds, failing
+    every upload with "upload failed: Permission denied" is a poor trade against
+    staging in a temp dir — the files are ephemeral either way, deleted as soon as the
+    ingest API accepts them. So fall back, and say so loudly at startup rather than
+    letting the configured path silently mean something else.
+    """
+    want = os.getenv("MCP_UPLOAD_DIR", "").strip() or _UPLOAD_DIR_FALLBACK
+    try:
+        os.makedirs(want, exist_ok=True)
+        probe = os.path.join(want, ".write-probe")
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.unlink(probe)
+        return want, None
+    except OSError as exc:
+        if want == _UPLOAD_DIR_FALLBACK:
+            return want, f"{want!r} is not writable ({exc})"
+        try:
+            os.makedirs(_UPLOAD_DIR_FALLBACK, exist_ok=True)
+        except OSError as exc2:
+            return want, (f"neither {want!r} nor {_UPLOAD_DIR_FALLBACK!r} is writable "
+                          f"({exc}; {exc2})")
+        return _UPLOAD_DIR_FALLBACK, (
+            f"MCP_UPLOAD_DIR={want!r} is not writable by this process ({exc}); "
+            f"staging in {_UPLOAD_DIR_FALLBACK!r} instead. The container runs as uid "
+            "10001 — either let the image's own /var/lib/brainkb-uploads stand, or "
+            "chown the bind-mounted host directory to 10001.")
+
+
+_UPLOAD_DIR, _UPLOAD_DIR_NOTE = _resolve_upload_dir()
 # One file, 5 GB — the ingest API's own per-user ceiling, so a file this endpoint
 # accepts is one the backend will also take.
 _UPLOAD_MAX_BYTES = _int_env("MCP_UPLOAD_MAX_BYTES", 5_000_000_000)
@@ -1394,12 +1430,30 @@ def _upload_load_any(upload_id: str, email: str) -> Tuple[Optional[dict],
         return None, {"error": True, "status_code": 404,
                       "detail": f"no record of upload {upload_id!r} for this account"}
     return meta, None
+
+
+def _upload_discard(upload_id: str) -> None:
+    """Delete a staged upload's payload and metadata, ignoring what is already gone.
+
+    Used by the cleanup paths — a rejected digest, a body over the cap, an explicit
+    discard, and a successful ingest — so it has to be indifferent to which of the two
+    files still exists.
+    """
+    for path in (_upload_data_path(upload_id), _upload_meta_path(upload_id)):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _ingest_path(p: str) -> str:
     """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
 
     realpath() first, so symlinks cannot point out of the configured root.
     """
     rp = os.path.realpath(os.path.expanduser(p))
+    if _UPLOAD_DIR_NOTE:
+        warn(_UPLOAD_DIR_NOTE)
     if _INGEST_ROOT:
         root = os.path.realpath(os.path.expanduser(_INGEST_ROOT))
         if rp != root and not rp.startswith(root + os.sep):
@@ -2197,6 +2251,8 @@ def _startup_warnings() -> None:
         warn("MCP_TRUSTED_PROXIES is empty — X-Forwarded-For is ignored and rate "
              "limits key on the socket peer. Behind a proxy that means all callers "
              "share one bucket; set it to your proxy's IP(s) or subnet CIDR(s).")
+    if _UPLOAD_DIR_NOTE:
+        warn(_UPLOAD_DIR_NOTE)
     if _INGEST_ROOT:
         # Worth saying once at startup, because the consequence is not obvious: a
         # file under this root can be ingested into a graph and then read straight
