@@ -35,13 +35,13 @@ Hardening knobs for the hosted (streamable-http) remote:
   MCP_INGEST_ROOT          Directory brainkb_ingest_files may read from. File
                            ingest is disabled on the remote unless this is set,
                            because paths resolve on the SERVER's filesystem.
-  MCP_INGEST_URL_ALLOWLIST Hosts brainkb_ingest_url may fetch from ('.s3.amazonaws.com'
-                           matches any subdomain). Empty by default, which disables
-                           the tool: a server-side fetch of a caller-supplied URL is
-                           SSRF. This is how a LARGE file is ingested on the remote —
-                           the bytes go URL -> server -> REST API, never through a
-                           caller's context, so there is nothing to transcribe and no
-                           reason to split the document.
+  MCP_UPLOAD_ENABLED       POST /upload — an AUTHENTICATED HTTP endpoint that stages
+                           an RDF file for ingest. This is how a large local file
+                           reaches the hosted remote: the client streams it from disk,
+                           so the bytes never pass through a model's context. On by
+                           default; 5 GB per file, expiring after MCP_UPLOAD_TTL_MIN.
+  MCP_UPLOAD_DIR           Where staged uploads live (default: a temp dir).
+
   MCP_ALLOW_SHARED_IDENTITY  Opt in to BRAINKB_TOKEN as an ambient identity
                            (single-user HTTP deployments only).
 
@@ -59,9 +59,11 @@ from __future__ import annotations
 import hashlib
 import html
 import ipaddress
+import json as jsonlib
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import weakref
@@ -387,6 +389,20 @@ def _parse_allowed() -> Dict[str, Optional[str]]:
 _ALLOWED_BASES: Dict[str, Optional[str]] = _parse_allowed()
 
 
+def _host_local(url: str) -> bool:
+    """True if `url` never leaves the machine — loopback, or Docker's host bridge.
+
+    Deliberately separate from `_is_loopback`, which decides whether a
+    caller-supplied base URL is permitted under stdio. Widening a security predicate
+    to quiet a startup warning is how a check stops meaning what its name says.
+    """
+    try:
+        host = httpx.URL(url).host
+    except Exception:
+        return False
+    return _is_loopback(url) or host in ("host.docker.internal", "host-gateway")
+
+
 def _is_loopback(url: str) -> bool:
     try:
         return httpx.URL(url).host in ("localhost", "127.0.0.1", "::1")
@@ -565,6 +581,35 @@ def _store_access(sd: dict, aud: str, token: str, ttl: int) -> None:
     sd.setdefault("access", {})[aud] = (token, time.time() + ttl)
 
 
+def _identify_raw(raw: str, base: str, audience: str = "") -> Dict[str, str]:
+    """Auth context for one bearer token, independent of the MCP request context.
+
+    This is the token-handling half of `_token_for`'s header pass-through, factored
+    out because the /upload route is a plain HTTP handler: it has a request but no
+    MCP session, so it cannot read the context headers. Sharing this code is the
+    point — an upload endpoint with its own, slightly different notion of who the
+    caller is would be a second authorization surface to keep in step, and the one
+    that drifts is the one that leaks.
+    """
+    audience = audience or _AUD_QUERY
+    um = _um_base(base)
+    # A Personal Access Token is opaque (not a JWT); exchange it for the requested
+    # service audience — one PAT unlocks every service.
+    if _is_pat(raw):
+        ex = _pat_exchange(um, raw, audience)
+        if ex:
+            return {"url": base, "token": ex[0], "email": _decode_sub(ex[0]) or ""}
+        raise _NotAuthed(f"Could not exchange the provided access token for '{audience}' "
+                         "(it may be expired or revoked).")
+    cl = _claims(raw)
+    if cl.get("typ") == "refresh" or cl.get("aud") == "brainkb-auth":
+        ex = _exchange(um, raw, audience)
+        if ex:
+            return {"url": base, "token": ex[0], "email": cl.get("sub") or ""}
+        raise _NotAuthed(f"Could not exchange the provided refresh token for '{audience}'.")
+    return {"url": base, "token": raw, "email": cl.get("sub") or _decode_sub(raw) or ""}
+
+
 def _token_for(audience: str) -> Dict[str, str]:
     """Resolve an auth context {url, token, email} whose token is valid for
     `audience` (query_service | usermanagement). Multi-user safe.
@@ -590,22 +635,7 @@ def _token_for(audience: str) -> Dict[str, str]:
     # 1) header pass-through
     authz = hdrs.get("authorization", "")
     if authz[:7].lower() == "bearer " and authz[7:].strip():
-        raw = authz[7:].strip()
-        # A Personal Access Token is opaque (not a JWT); exchange it for the
-        # requested service audience — one PAT unlocks every service.
-        if _is_pat(raw):
-            ex = _pat_exchange(um, raw, audience)
-            if ex:
-                return {"url": base, "token": ex[0], "email": _decode_sub(ex[0]) or ""}
-            raise _NotAuthed(f"Could not exchange the provided access token for '{audience}' "
-                             "(it may be expired or revoked).")
-        cl = _claims(raw)
-        if cl.get("typ") == "refresh" or cl.get("aud") == "brainkb-auth":
-            ex = _exchange(um, raw, audience)
-            if ex:
-                return {"url": base, "token": ex[0], "email": cl.get("sub") or ""}
-            raise _NotAuthed(f"Could not exchange the provided refresh token for '{audience}'.")
-        return {"url": base, "token": raw, "email": cl.get("sub") or _decode_sub(raw) or ""}
+        return _identify_raw(authz[7:].strip(), base, audience)
 
     # 2) per-session (cached access -> refresh -> legacy)
     if key is not None and key in _SESSIONS and _session_expired(_SESSIONS[key]):
@@ -1164,67 +1194,206 @@ def brainkb_add_space_graph(slug: str, named_graph_iri: str, description: str = 
 # unless MCP_INGEST_ROOT confines it to a directory.
 _INGEST_ROOT = os.getenv("MCP_INGEST_ROOT", "").strip()
 
-# --- ingest-from-URL ------------------------------------------------------- #
-# The gap this closes: on a hosted remote, brainkb_ingest_files reads the SERVER's
-# filesystem, so a file on the caller's machine cannot be ingested at all — and the
-# only alternative, retyping the RDF into brainkb_ingest_text, is a fidelity gamble
-# on an append-only store. Fetching by URL keeps the bytes entirely server-side:
-# they go URL -> this process -> the REST API, never through a model's context.
+# --- upload staging ------------------------------------------------------------ #
+# What this exists for: MCP tool arguments are authored by the model, so any file
+# routed through one has to be re-emitted token by token — which is why a 2.8 MB
+# Turtle export is unreachable on the hosted remote even though the server itself
+# could ingest it in seconds. The bytes need a path to the server that does not pass
+# through a context window, and MCP has no upload primitive. So the server offers a
+# plain authenticated HTTP endpoint: the CLIENT streams the file from disk (a few
+# lines of `requests`), the server stages it, and a tool then ingests it by id.
 #
-# It is also a textbook SSRF primitive, so it is off unless an operator names the
-# hosts it may fetch from, exactly like MCP_ALLOWED_BASE_URLS. Host suffixes are
-# allowed ('.s3.amazonaws.com' matches any bucket host under it).
-_INGEST_URL_HOSTS = tuple(
-    h.strip().lower().lstrip(".")
-    for h in os.getenv("MCP_INGEST_URL_ALLOWLIST", "").split(",")
-    if h.strip()
-)
-# Cap on a fetched body. The backend accepts multi-GB uploads, but an unbounded
-# fetch is a disk-exhaustion lever on a shared host.
-_MAX_INGEST_URL_BYTES = _int_env("MCP_MAX_INGEST_URL_BYTES", 1_000_000_000)
-_INGEST_URL_ALLOW_HTTP = os.getenv(
-    "MCP_INGEST_URL_ALLOW_HTTP", "false").strip().lower() in ("1", "true", "yes")
-# Suffixes the ingest endpoint understands. Used only to name the uploaded part
-# sensibly — the backend decides the real format.
-_RDF_SUFFIXES = (".ttl", ".nt", ".nq", ".n3", ".rdf", ".owl", ".xml",
-                 ".jsonld", ".json", ".trig", ".gz")
+# The file never enters anyone's context: the client code NAMES the file and the HTTP
+# library reads it off disk. That is the whole difference between
+# `data=open("review.ttl","rb")` and pasting 2.8 MB into a tool call.
+_UPLOAD_ENABLED = os.getenv(
+    "MCP_UPLOAD_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+_UPLOAD_DIR = os.getenv("MCP_UPLOAD_DIR", "").strip() or os.path.join(
+    tempfile.gettempdir(), "brainkb-uploads")
+# One file, 5 GB — the ingest API's own per-user ceiling, so a file this endpoint
+# accepts is one the backend will also take.
+_UPLOAD_MAX_BYTES = _int_env("MCP_UPLOAD_MAX_BYTES", 5_000_000_000)
+# Total across all staged uploads. The per-file cap alone does not stop a caller
+# from filling the disk with many files.
+_UPLOAD_TOTAL_BYTES = _int_env("MCP_UPLOAD_TOTAL_BYTES", 20_000_000_000)
+_UPLOAD_TTL_MIN = _int_env("MCP_UPLOAD_TTL_MIN", 360)
+_UPLOAD_ID_RE = re.compile(r"^up_[0-9a-f]{32}$")
 
 
-def _host_allowed(host: str) -> bool:
-    """True if `host` is exactly an allowlisted host or sits under one."""
-    host = (host or "").lower().rstrip(".")
-    return any(host == h or host.endswith("." + h) for h in _INGEST_URL_HOSTS)
+def _upload_meta_path(upload_id: str) -> str:
+    return os.path.join(_UPLOAD_DIR, upload_id + ".json")
 
 
-def _public_ip(host: str) -> Optional[str]:
-    """Resolve `host` and return the reason it is NOT fetchable, or None if it is.
+def _upload_data_path(upload_id: str) -> str:
+    return os.path.join(_UPLOAD_DIR, upload_id + ".data")
 
-    Every resolved address must be public. A hostname that resolves to a private,
-    loopback, link-local or reserved address is the SSRF case this exists for — it
-    is how a fetch becomes a read of the cloud metadata service (169.254.169.254),
-    a sibling container, or the backend's own admin port.
-    """
-    import socket
 
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError as exc:
-        return f"could not resolve {host!r} ({exc})"
-    if not infos:
-        return f"could not resolve {host!r}"
-    for info in infos:
-        addr = info[4][0]
+def _upload_sweep() -> int:
+    """Delete staged uploads past their TTL. Returns the bytes reclaimed."""
+    if not os.path.isdir(_UPLOAD_DIR):
+        return 0
+    cutoff = time.time() - max(1, _UPLOAD_TTL_MIN) * 60
+    freed = 0
+    for name in os.listdir(_UPLOAD_DIR):
+        if not name.startswith("up_"):
+            continue
+        path = os.path.join(_UPLOAD_DIR, name)
         try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return f"{host!r} resolved to an unusable address {addr!r}"
-        if not ip.is_global or ip.is_multicast:
-            return (f"{host!r} resolves to the non-public address {addr} — refused "
-                    "(this is the SSRF case: private, loopback, link-local and "
-                    "metadata addresses are never fetched)")
-    return None
+            st = os.stat(path)
+            if st.st_mtime >= cutoff:
+                continue
+            # Never reap a file whose background submission is still running — the
+            # upload would vanish from under the thread streaming it.
+            if _upload_state(name.split(".")[0]) == "submitting":
+                continue
+            freed += st.st_size
+            os.unlink(path)
+        except OSError:
+            continue
+    return freed
 
 
+def _upload_state(upload_id: str) -> str:
+    try:
+        with open(_upload_meta_path(upload_id), "r", encoding="utf-8") as fh:
+            return str(jsonlib.load(fh).get("state") or "staged")
+    except (OSError, ValueError):
+        return "gone"
+
+
+def _upload_meta_write(upload_id: str, meta: dict) -> None:
+    """Write meta atomically — a half-written file would read as a corrupt upload."""
+    tmp = _upload_meta_path(upload_id) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        jsonlib.dump(meta, fh)
+    os.replace(tmp, _upload_meta_path(upload_id))
+
+
+def _upload_submit(upload_id: str, meta: dict, url: str, token: str,
+                   email: str, graph: str) -> None:
+    """POST a staged upload to the ingest API. Runs on a background thread.
+
+    The caller's token is passed in and used here, never written to disk: the meta
+    file sits on the server's filesystem, and a credential in it would outlive the
+    request that authorised it.
+    """
+    meta = dict(meta)
+    try:
+        with open(_upload_data_path(upload_id), "rb") as fh:
+            with httpx.Client(timeout=_UPLOAD_TIMEOUT) as c:
+                resp = c.post(
+                    f"{url}/api/insert/files/knowledge-graph-triples",
+                    params={"user_id": email, "named_graph_iri": graph},
+                    headers={"Authorization": f"Bearer {token}"},
+                    files=[("files", (str(meta.get("filename") or "upload.ttl"),
+                                      fh, "application/octet-stream"))],
+                )
+        body: Any
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"text": resp.text[:400]}
+        if resp.status_code < 400:
+            meta.update({"state": "submitted", "http_status": resp.status_code,
+                         "job": body,
+                         "job_id": (body or {}).get("job_id")
+                         if isinstance(body, dict) else None})
+            _upload_meta_write(upload_id, meta)
+            # The ingest API holds the bytes now; a second copy is just disk.
+            try:
+                os.unlink(_upload_data_path(upload_id))
+            except OSError:
+                pass
+        else:
+            meta.update({"state": "failed", "http_status": resp.status_code,
+                         "error": body,
+                         "note": ("the staged bytes were kept — fix the cause and "
+                                  "retry with brainkb_ingest_upload, no re-upload "
+                                  "needed")})
+            _upload_meta_write(upload_id, meta)
+    except Exception as exc:                      # noqa: BLE001 - thread boundary
+        meta.update({"state": "failed", "error": str(exc),
+                     "note": "staged bytes kept; retry with brainkb_ingest_upload"})
+        try:
+            _upload_meta_write(upload_id, meta)
+        except OSError:
+            pass
+
+
+def _upload_total_bytes() -> int:
+    if not os.path.isdir(_UPLOAD_DIR):
+        return 0
+    total = 0
+    for name in os.listdir(_UPLOAD_DIR):
+        if name.startswith("up_") and name.endswith(".data"):
+            try:
+                total += os.path.getsize(os.path.join(_UPLOAD_DIR, name))
+            except OSError:
+                pass
+    return total
+
+
+def _upload_load(upload_id: str, email: str) -> Tuple[Optional[dict], Optional[dict]]:
+    """(meta, error) for `upload_id`, enforcing ownership and expiry.
+
+    Ownership is the part that matters. An upload id is a bearer capability sitting
+    on a multi-user host, so it is bound to the email that uploaded it and only that
+    identity may ingest it — otherwise one caller could name another's staged file
+    and have the server write it into a graph under their own attribution, which the
+    provenance record would then report as theirs forever.
+    """
+    if not _UPLOAD_ID_RE.match(upload_id or ""):
+        return None, {"error": True, "status_code": 400,
+                      "detail": "malformed upload_id (expected up_<32 hex>)"}
+    if not email:
+        return None, {"error": True, "status_code": 401,
+                      "detail": "cannot establish the caller's identity"}
+    try:
+        with open(_upload_meta_path(upload_id), "r", encoding="utf-8") as fh:
+            meta = jsonlib.load(fh)
+    except (OSError, ValueError):
+        return None, {"error": True, "status_code": 404,
+                      "detail": (f"no staged upload {upload_id!r} (it may have "
+                                 f"expired — uploads are kept "
+                                 f"{_UPLOAD_TTL_MIN} minutes — or already been "
+                                 "ingested)")}
+    if (meta.get("email") or "").lower() != email.lower():
+        # Deliberately the same 404 shape as a missing upload: confirming that some
+        # other user's id exists is itself information.
+        return None, {"error": True, "status_code": 404,
+                      "detail": f"no staged upload {upload_id!r} for this account"}
+    if not os.path.isfile(_upload_data_path(upload_id)):
+        return None, {"error": True, "status_code": 404,
+                      "detail": (f"staged bytes for {upload_id!r} are gone (already "
+                                 "ingested? brainkb_upload_status reports its "
+                                 "outcome)")}
+    return meta, None
+
+
+def _upload_load_any(upload_id: str, email: str) -> Tuple[Optional[dict],
+                                                          Optional[dict]]:
+    """Like `_upload_load` but does not require the staged bytes to still exist.
+
+    A successful ingest deletes the payload and keeps the metadata, so status has to
+    read the metadata alone — otherwise the one case a caller most wants to check
+    (did it land?) is the one that 404s. Ownership is enforced identically.
+    """
+    if not _UPLOAD_ID_RE.match(upload_id or ""):
+        return None, {"error": True, "status_code": 400,
+                      "detail": "malformed upload_id (expected up_<32 hex>)"}
+    if not email:
+        return None, {"error": True, "status_code": 401,
+                      "detail": "cannot establish the caller's identity"}
+    try:
+        with open(_upload_meta_path(upload_id), "r", encoding="utf-8") as fh:
+            meta = jsonlib.load(fh)
+    except (OSError, ValueError):
+        return None, {"error": True, "status_code": 404,
+                      "detail": f"no record of upload {upload_id!r}"}
+    if (meta.get("email") or "").lower() != email.lower():
+        return None, {"error": True, "status_code": 404,
+                      "detail": f"no record of upload {upload_id!r} for this account"}
+    return meta, None
 def _ingest_path(p: str) -> str:
     """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
 
@@ -1247,8 +1416,17 @@ def _ingest_path(p: str) -> str:
         raise PermissionError(
             "File ingest is disabled on the hosted remote: paths are read from the "
             "SERVER's filesystem, not yours, so this server cannot see your file. "
-            "Ask the operator to set MCP_INGEST_ROOT to an ingest directory (plus "
-            "the matching bind mount) and place the file there. Do NOT re-type the "
+            "Upload it instead — no operator change needed:\n"
+            "  import requests\n"
+            "  requests.post('https://<this-host>/upload',\n"
+            "                params={'filename': 'file.ttl', 'graph': '<graph_iri>'},\n"
+            "                headers={'Authorization': f'Bearer {TOKEN}'},\n"
+            "                data=open('file.ttl','rb'))\n"
+            "That streams the bytes off your disk and the server ingests them; poll "
+            "brainkb_upload_status(upload_id). (Omit &graph to stage it and call "
+            "brainkb_ingest_upload yourself.) Alternatively the operator can set "
+            "MCP_INGEST_ROOT plus a bind mount and place the file there. Do NOT "
+            "re-type the "
             "file's RDF into brainkb_ingest_text: ingest is append-only, dense "
             "Turtle does not survive transcription intact, and splitting it across "
             "calls silently breaks blank nodes. brainkb_ingest_text is for RDF you "
@@ -1296,7 +1474,10 @@ def brainkb_ingest_text(named_graph_iri: str, data: str,
     if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
         return {"error": True, "status_code": 413,
                 "detail": (f"Payload too large ({len(payload)} bytes > "
-                           f"{_MAX_INGEST_BYTES}). Use file ingest — do NOT split "
+                           f"{_MAX_INGEST_BYTES}). Upload the file instead — "
+                           "POST /upload with 'Authorization: Bearer <token>' and "
+                           "--data-binary @file, then brainkb_ingest_upload (or add "
+                           "&graph=<iri> to have the server submit it). Do NOT split "
                            "the RDF across calls: blank-node labels are scoped to "
                            "one document, so a bnode shared by two calls becomes "
                            "two distinct nodes and the triples silently detach.")}
@@ -1305,142 +1486,150 @@ def brainkb_ingest_text(named_graph_iri: str, data: str,
                  content=payload, ctype="text/plain")
 
 
+def _scopes_of(token: str) -> List[str]:
+    """Scopes claimed by an access token. Used to refuse an upload the caller could
+    never ingest — the REST insert routes gate on `write`, so staging bytes for a
+    read-only account is just disk we would have to reclaim."""
+    cl = _claims(token) or {}
+    sc = cl.get("scopes")
+    return [str(s) for s in sc] if isinstance(sc, list) else []
+
+
 @mcp.tool()
-def brainkb_ingest_url(named_graph_iri: str, url: str, sha256: str = "",
-                       filename: str = "") -> Any:
-    """Ingest an RDF file that this server fetches from `url` itself.
+def brainkb_list_uploads() -> Any:
+    """List RDF files YOU have staged with POST /upload but not yet ingested.
 
-    This is how to ingest a LARGE file on the hosted remote. The bytes go
-    URL -> this server -> the ingest API and never pass through the caller's
-    context, so there is no transcription risk, no size ceiling imposed by a context
-    window, and no reason to split the document (splitting breaks blank-node
-    identity, which corrupts an append-only graph silently).
+    Shows each upload_id, its size, sha256 and when it expires. Only your own
+    uploads are visible."""
+    try:
+        email = _me()
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    _upload_sweep()
+    out = []
+    if os.path.isdir(_UPLOAD_DIR):
+        for name in sorted(os.listdir(_UPLOAD_DIR)):
+            if not name.endswith(".json"):
+                continue
+            uid = name[:-5]
+            meta, _ = _upload_load_any(uid, email)
+            if meta:
+                out.append({k: meta.get(k) for k in
+                            ("upload_id", "filename", "bytes", "sha256", "state",
+                             "job_id", "named_graph_iri", "uploaded_at",
+                             "expires_at") if meta.get(k) is not None})
+    return {"uploads": out, "count": len(out),
+            "ttl_minutes": _UPLOAD_TTL_MIN,
+            "next": ("brainkb_ingest_upload(named_graph_iri, upload_id) — the server "
+                     "ingests the staged bytes; nothing passes through your context")}
 
-    Put the file anywhere the server can reach over HTTPS — an S3/GCS presigned URL,
-    a release asset, an internal artifact store — and pass that URL. Give `sha256`
-    (`shasum -a 256 file.ttl`) whenever you can: it is verified after download and
-    before anything is written.
 
-    Returns a job_id; ingestion runs in the background — poll brainkb_job_status,
-    then reconcile brainkb_delta(job_id) against the triple count you expected.
+@mcp.tool()
+def brainkb_upload_status(upload_id: str) -> Any:
+    """State of one of your staged/submitted uploads.
 
-    Requires the operator to have set MCP_INGEST_URL_ALLOWLIST, because fetching an
-    arbitrary URL server-side is SSRF. Redirects are not followed: a redirect can
-    move the request to a host the allowlist never approved.
+    `state` is `staged` (waiting for brainkb_ingest_upload), `submitting` (the server
+    is streaming it to the ingest API), `submitted` (accepted — `job_id` is set, poll
+    brainkb_job_status) or `failed` (the staged bytes were KEPT, so retry with
+    brainkb_ingest_upload rather than re-uploading)."""
+    try:
+        email = _me()
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    meta, err = _upload_load_any(upload_id, email)
+    if err:
+        return err
+    assert meta is not None
+    out = {k: meta.get(k) for k in
+           ("upload_id", "filename", "bytes", "sha256", "state", "job_id",
+            "named_graph_iri", "uploaded_at", "expires_at", "error", "note")
+           if meta.get(k) is not None}
+    if meta.get("state") == "submitted" and meta.get("job_id"):
+        out["next"] = (f"brainkb_job_status('{meta['job_id']}') then "
+                       f"brainkb_delta('{meta['job_id']}') to count the triples "
+                       "actually added")
+    return out
+
+
+@mcp.tool()
+def brainkb_discard_upload(upload_id: str) -> Any:
+    """Delete one of your staged uploads without ingesting it."""
+    try:
+        email = _me()
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    meta, err = _upload_load(upload_id, email)
+    if err:
+        return err
+    _upload_discard(upload_id)
+    return {"discarded": upload_id, "bytes": (meta or {}).get("bytes")}
+
+
+@mcp.tool()
+def brainkb_ingest_upload(named_graph_iri: str, upload_id: str) -> Any:
+    """Ingest a file you staged with `POST /upload` into a named graph.
+
+    This is the route for a large local file: your HTTP client streams the bytes
+    straight to this server over HTTPS, then you name the resulting upload_id here. The
+    server reads its own staged copy and posts it to the ingest API internally, so
+    the RDF never passes through a model's context — nothing to transcribe, no
+    context-window ceiling, and no reason to split the document (splitting breaks
+    blank-node identity and silently detaches triples, permanently).
+
+    Stage a file with any HTTP client — the point is that the LIBRARY reads the file,
+    so the bytes never pass through a model:
+
+        import requests, hashlib, pathlib
+        f = pathlib.Path("review.ttl")
+        r = requests.post(
+            "https://mcp.brainkb.org/upload",
+            params={"filename": f.name,
+                    "sha256": hashlib.sha256(f.read_bytes()).hexdigest()},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            data=f.open("rb"),          # streamed — never loaded into memory
+        )
+        print(r.json())                 # -> {"upload_id": "up_...", "state": "staged"}
+
+    It returns an upload_id and the sha256 the server computed — compare it with your
+    own before ingesting.
+
+    Returns a job_id; poll brainkb_job_status, then reconcile brainkb_delta(job_id)
+    against the triple count you expected. The staged copy is deleted once the
+    ingest API has accepted the bytes.
     """
-    if not _INGEST_URL_HOSTS:
-        return {"error": True, "status_code": 403,
-                "detail": ("URL ingest is disabled: no MCP_INGEST_URL_ALLOWLIST is "
-                           "configured. Ask the operator to allowlist the host(s) "
-                           "you will serve files from (e.g. "
-                           "MCP_INGEST_URL_ALLOWLIST=.s3.amazonaws.com,files.example.org). "
-                           "Until then, the supported path for a large file is "
-                           "MCP_INGEST_ROOT + brainkb_ingest_files.")}
     try:
-        parsed = httpx.URL(url)
-    except Exception as exc:
-        return {"error": True, "status_code": 400, "detail": f"unusable url: {exc}"}
-    scheme = (parsed.scheme or "").lower()
-    if scheme not in ("https", "http"):
-        return {"error": True, "status_code": 400,
-                "detail": f"only http(s) urls may be fetched, got {scheme!r}"}
-    if scheme == "http" and not _INGEST_URL_ALLOW_HTTP:
-        return {"error": True, "status_code": 400,
-                "detail": ("refusing a plaintext http url — the fetch would be "
-                           "readable and tamperable in transit. Use https, or set "
-                           "MCP_INGEST_URL_ALLOW_HTTP=true for a trusted internal "
-                           "host.")}
-    host = parsed.host or ""
-    if not _host_allowed(host):
-        return {"error": True, "status_code": 403,
-                "detail": (f"host {host!r} is not in MCP_INGEST_URL_ALLOWLIST "
-                           f"({', '.join(_INGEST_URL_HOSTS)}). The allowlist is the "
-                           "whole security boundary here, so it is not bypassable "
-                           "per call.")}
-    bad = _public_ip(host)
-    if bad:
-        return {"error": True, "status_code": 403, "detail": bad}
-
-    name = os.path.basename(filename or parsed.path or "") or "ingest.ttl"
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120]
-    if not name.lower().endswith(_RDF_SUFFIXES):
-        name += ".ttl"
-
-    import tempfile
-
-    digest = hashlib.sha256()
-    total = 0
-    tmp = None
+        ctx = _resolve()
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    meta, err = _upload_load(upload_id, ctx.get("email") or "")
+    if err:
+        return err
+    assert meta is not None
+    name = str(meta.get("filename") or "upload.ttl")
     try:
-        with tempfile.NamedTemporaryFile(prefix="brainkb-ingest-", suffix="-" + name,
-                                         delete=False) as fh:
-            tmp = fh.name
-            # Streamed, so a multi-GB file never has to fit in memory, and the cap
-            # can be enforced mid-transfer rather than after the damage.
-            with httpx.Client(timeout=_UPLOAD_TIMEOUT,
-                              follow_redirects=False) as c:
-                with c.stream("GET", url) as resp:
-                    if resp.status_code in (301, 302, 303, 307, 308):
-                        return {"error": True, "status_code": 400,
-                                "detail": (f"{url} redirected to "
-                                           f"{resp.headers.get('location')!r}. "
-                                           "Redirects are not followed — pass the "
-                                           "final URL so the allowlist applies to "
-                                           "the host actually fetched.")}
-                    if resp.status_code >= 400:
-                        return {"error": True, "status_code": resp.status_code,
-                                "detail": f"fetch failed: HTTP {resp.status_code}"}
-                    ctype = (resp.headers.get("content-type") or "").lower()
-                    first = b""
-                    for chunk in resp.iter_bytes(1 << 20):
-                        if not first:
-                            first = chunk[:200]
-                        total += len(chunk)
-                        if _MAX_INGEST_URL_BYTES and total > _MAX_INGEST_URL_BYTES:
-                            return {"error": True, "status_code": 413,
-                                    "detail": (f"fetch exceeded "
-                                               f"{_MAX_INGEST_URL_BYTES} bytes "
-                                               "(MCP_MAX_INGEST_URL_BYTES)")}
-                        digest.update(chunk)
-                        fh.write(chunk)
-        if total == 0:
-            return {"error": True, "status_code": 400, "detail": "fetched 0 bytes"}
-        # A login wall or an expired presigned URL answers 200 with HTML, which the
-        # ingest job would then fail on far downstream. Catch it here, where the
-        # error can still name the cause.
-        head = first.decode("utf-8", "replace").lstrip().lower()
-        if head.startswith(("<!doctype html", "<html")) or "text/html" in ctype:
-            return {"error": True, "status_code": 400,
-                    "detail": (f"{url} returned HTML, not RDF (content-type "
-                               f"{ctype or 'unknown'}). An expired presigned URL or "
-                               "a login page is the usual cause.")}
-        got = digest.hexdigest()
-        if sha256 and got != sha256.strip().lower():
-            return {"error": True, "status_code": 400,
-                    "detail": (f"digest mismatch: declared {sha256.strip().lower()}, "
-                               f"fetched {got} ({total} bytes). Nothing was written "
-                               "— the URL is not serving the file you hashed.")}
-        with open(tmp, "rb") as fh:
+        with open(_upload_data_path(upload_id), "rb") as fh:
             out = _post("/api/insert/files/knowledge-graph-triples",
-                        params={"user_id": _me(),
+                        params={"user_id": ctx["email"],
                                 "named_graph_iri": named_graph_iri},
                         files=[("files", (name, fh, "application/octet-stream"))],
                         timeout=_UPLOAD_TIMEOUT)
-        if isinstance(out, dict):
-            out.setdefault("fetched", {})
-            out["fetched"] = {"url": url, "bytes": total, "sha256": got,
-                              "uploaded_as": name}
-        return out
-    except _NotAuthed as e:
-        return {"error": True, "detail": str(e)}
-    except Exception as e:
-        return {"error": True, "detail": f"fetch/ingest failed: {e}"}
-    finally:
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+    except OSError as e:
+        return {"error": True, "detail": f"could not read the staged upload: {e}"}
+    accepted = isinstance(out, dict) and not out.get("error")
+    if accepted:
+        # The ingest API has the bytes now; keeping a second copy here only fills the
+        # disk. A failed submission keeps the staging file so the call can be retried
+        # without re-uploading.
+        _upload_discard(upload_id)
+    if isinstance(out, dict):
+        out["ingested_upload"] = {
+            "upload_id": upload_id, "filename": name,
+            "bytes": meta.get("bytes"), "sha256": meta.get("sha256"),
+            "staged_copy": "deleted" if accepted else "kept for retry",
+            "verify": ("compare brainkb_delta(job_id)'s triple count against the "
+                       "source file's own count"),
+        }
+    return out
 
 
 @mcp.tool()
@@ -1786,6 +1975,144 @@ def _self_host(request: Any) -> str:
     return host if _HOST_RE.match(host) else "mcp.brainkb.org"
 
 
+@mcp.custom_route("/upload", methods=["POST"])
+async def _upload(request: Any) -> Any:
+    """Stage an RDF file for ingest, streamed straight from the client's disk.
+
+    Unlike the other two custom routes this one is AUTHENTICATED — it writes to the
+    server's filesystem and acts on the caller's behalf, so it validates the bearer
+    token through exactly the same path the MCP tools use (`_identify_raw`), and
+    checks the `write` scope the ingest API itself requires.
+
+        import requests
+        requests.post("https://mcp.brainkb.org/upload",
+                      params={"filename": "review.ttl"},
+                      headers={"Authorization": f"Bearer {TOKEN}"},
+                      data=open("review.ttl", "rb"))
+
+    Pass `graph=<iri>` as well to have the server submit the ingest itself and answer
+    202 immediately — upload and forget. Poll brainkb_upload_status(upload_id) or,
+    once it reports a job_id, brainkb_job_status(job_id).
+    """
+    from starlette.responses import JSONResponse
+
+    if not _UPLOAD_ENABLED:
+        return JSONResponse({"error": True, "detail": (
+            "uploads are disabled on this server (MCP_UPLOAD_ENABLED=false)")}, 403)
+
+    authz = request.headers.get("authorization", "")
+    if authz[:7].lower() != "bearer " or not authz[7:].strip():
+        return JSONResponse(
+            {"error": True, "detail": (
+                "send 'Authorization: Bearer <token>' — a Personal Access Token "
+                "(brainkb_pat_...) or a refresh token. Uploads are attributed to "
+                "that identity and only it can ingest them.")},
+            401, headers={"WWW-Authenticate": "Bearer"})
+    try:
+        ctx = _identify_raw(authz[7:].strip(), _DEFAULT_URL)
+    except _NotAuthed as exc:
+        return JSONResponse({"error": True, "detail": str(exc)}, 401)
+    email = (ctx.get("email") or "").strip()
+    if not email:
+        return JSONResponse({"error": True, "detail": (
+            "the token is valid but carries no identity; cannot attribute an "
+            "upload to it")}, 401)
+    # Refuse bytes the caller could never ingest. The REST insert routes are gated
+    # on the `write` scope, so without it this would be staging a file solely to
+    # fail later — while consuming the disk in the meantime.
+    scopes = _scopes_of(ctx.get("token") or "")
+    if scopes and "write" not in scopes:
+        return JSONResponse({"error": True, "detail": (
+            f"this token has scopes {scopes} and ingest requires 'write'. Nothing "
+            "was stored. If you hold a role that should permit writing, your token "
+            "predates the role — log out and back in, or mint a fresh PAT.")}, 403)
+
+    graph = (request.query_params.get("graph") or "").strip()
+    raw_name = (request.query_params.get("filename")
+                or request.headers.get("x-upload-filename") or "upload.ttl")
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(raw_name))[:120] or "upload.ttl"
+    declared = (request.query_params.get("sha256")
+                or request.headers.get("x-upload-sha256") or "").strip().lower()
+
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    _upload_sweep()
+    staged = _upload_total_bytes()
+    if _UPLOAD_TOTAL_BYTES and staged >= _UPLOAD_TOTAL_BYTES:
+        return JSONResponse({"error": True, "detail": (
+            f"the staging area is full ({staged} bytes >= "
+            f"{_UPLOAD_TOTAL_BYTES}). Ingest or discard what is already staged "
+            "(brainkb_list_uploads / brainkb_discard_upload).")}, 507)
+
+    upload_id = "up_" + os.urandom(16).hex()
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with open(_upload_data_path(upload_id), "wb") as fh:
+            # Streamed: a 5 GB body must never be buffered in memory, and the cap
+            # has to bite mid-transfer rather than after the disk is full.
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if _UPLOAD_MAX_BYTES and total > _UPLOAD_MAX_BYTES:
+                    fh.close()
+                    _upload_discard(upload_id)
+                    return JSONResponse({"error": True, "detail": (
+                        f"file exceeds {_UPLOAD_MAX_BYTES} bytes "
+                        "(MCP_UPLOAD_MAX_BYTES)")}, 413)
+                digest.update(chunk)
+                fh.write(chunk)
+    except Exception as exc:                       # noqa: BLE001 - request boundary
+        _upload_discard(upload_id)
+        return JSONResponse({"error": True, "detail": f"upload failed: {exc}"}, 400)
+
+    if total == 0:
+        _upload_discard(upload_id)
+        return JSONResponse({"error": True, "detail": (
+            "received 0 bytes — use --data-binary @file (not -d, which mangles "
+            "newlines)")}, 400)
+    got = digest.hexdigest()
+    if declared and declared != got:
+        _upload_discard(upload_id)
+        return JSONResponse({"error": True, "detail": (
+            f"digest mismatch: declared {declared}, received {got} ({total} bytes). "
+            "Nothing was stored.")}, 400)
+
+    now = time.time()
+    meta = {
+        "upload_id": upload_id, "filename": name, "bytes": total, "sha256": got,
+        "email": email, "state": "staged",
+        "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                    time.gmtime(now + _UPLOAD_TTL_MIN * 60)),
+    }
+    if graph:
+        meta.update({"state": "submitting", "named_graph_iri": graph})
+    _upload_meta_write(upload_id, meta)
+
+    if graph:
+        # Upload and forget: hand the submission to a daemon thread so a multi-GB
+        # POST to the ingest API does not hold the client's connection open, and
+        # answer 202 with something to poll.
+        threading.Thread(
+            target=_upload_submit,
+            args=(upload_id, meta, ctx["url"], ctx["token"], email, graph),
+            daemon=True, name=f"ingest-{upload_id}").start()
+        return JSONResponse({
+            "upload_id": upload_id, "bytes": total, "sha256": got,
+            "state": "submitting", "named_graph_iri": graph,
+            "next": (f"brainkb_upload_status('{upload_id}') — it reports a job_id "
+                     "once the ingest API accepts the bytes, then poll "
+                     "brainkb_job_status(job_id)"),
+        }, 202)
+    return JSONResponse({
+        "upload_id": upload_id, "bytes": total, "sha256": got, "state": "staged",
+        "expires_at": meta["expires_at"],
+        "next": (f"brainkb_ingest_upload(named_graph_iri, '{upload_id}') — or "
+                 "re-upload with &graph=<iri> to have the server submit it for you"),
+    }, 201)
+
+
 @mcp.custom_route("/", methods=["GET"])
 async def _landing(request: Any) -> Any:
     from starlette.responses import HTMLResponse
@@ -1815,6 +2142,18 @@ client, not a browser.</p>
 <p>Each caller authenticates <strong>per request</strong> with their own BrainKB
 credential — an <code>Authorization: Bearer</code> header, or a Personal Access
 Token via the login tools. There is no shared or ambient identity.</p>
+<p><strong>Ingesting a large RDF file.</strong> MCP tool arguments are written by the
+model, so a file passed through one has to be re-typed token by token — unusable above
+a few KB, and unsafe for RDF. Stream it here instead, and the server ingests it
+through the same API the tools use:</p>
+<pre>import requests
+requests.post("https://{host}/upload",
+              params={{"filename": "review.ttl", "graph": "&lt;graph_iri&gt;"}},
+              headers={{"Authorization": f"Bearer {{TOKEN}}"}},
+              data=open("review.ttl", "rb"))   # streamed off disk</pre>
+<p>Answers <code>202</code> with an <code>upload_id</code> and ingests in the
+background. Omit <code>&amp;graph</code> to stage only, then call
+<code>brainkb_ingest_upload</code>. Up to 5&nbsp;GB per file.</p>
 <p>Opening <code>/mcp</code> in a browser returns
 <code>Not Acceptable: Client must accept text/event-stream</code>. That is the
 endpoint working correctly: a browser GET sends no
@@ -1859,9 +2198,15 @@ def _startup_warnings() -> None:
              "limits key on the socket peer. Behind a proxy that means all callers "
              "share one bucket; set it to your proxy's IP(s) or subnet CIDR(s).")
     if _INGEST_ROOT:
-        warn(f"brainkb_ingest_files may read from {_INGEST_ROOT!r} on the SERVER's "
-             "filesystem. Ensure it holds nothing callers shouldn't retrieve.")
-    if _DEFAULT_URL.startswith("http://") and not _is_loopback(_DEFAULT_URL):
+        # Worth saying once at startup, because the consequence is not obvious: a
+        # file under this root can be ingested into a graph and then read straight
+        # back out with brainkb_read_space. So the root has to be a dedicated upload
+        # directory, not a data volume that happens to contain RDF.
+        warn(f"brainkb_ingest_files may read anything under {_INGEST_ROOT!r} on the "
+             "SERVER's filesystem, and callers can read it back out of the graph "
+             "afterwards. Keep it a dedicated upload dir. Not needed for a caller's "
+             "own file — that is POST /upload.")
+    if _DEFAULT_URL.startswith("http://") and not _host_local(_DEFAULT_URL):
         warn(f"BRAINKB_URL is plaintext HTTP ({_DEFAULT_URL}) — bearer tokens will "
              "cross the network unencrypted.")
 
