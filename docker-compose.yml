@@ -56,11 +56,13 @@ services:
       MCP_UPLOAD_MAX_BYTES: ${MCP_UPLOAD_MAX_BYTES:-5000000000}
       MCP_UPLOAD_TOTAL_BYTES: ${MCP_UPLOAD_TOTAL_BYTES:-20000000000}
       MCP_UPLOAD_TTL_MIN: ${MCP_UPLOAD_TTL_MIN:-360}
-    # First entry: only if you set MCP_INGEST_ROOT (remote file ingest) — the
-    # container path must match it exactly, and ro so ingest can't write into it.
-    # Second: persist POST /upload's staging area, so a restart mid-upload doesn't
-    # lose staged files. Without it they live in the container's temp dir, which is
-    # fine (they expire anyway) but does not survive a redeploy.
+    # Neither mount is required. First entry: only if you set MCP_INGEST_ROOT (remote
+    # file ingest) — the container path must match it exactly, and ro so ingest can't
+    # write into it. Second: only to persist POST /upload's staging area across a
+    # redeploy; the image already creates /var/lib/brainkb-uploads owned by uid 10001,
+    # so uploads work without it. If you do mount a host directory there, chown it to
+    # 10001 — the container runs non-root, and otherwise the server warns at startup
+    # and stages in a temp dir instead.
     # volumes:
     #   - /srv/brainkb-ingest:/srv/brainkb-ingest:ro
     #   - /var/lib/brainkb-uploads:/var/lib/brainkb-uploads

@@ -21,8 +21,14 @@ ENV MCP_TRANSPORT=streamable-http \
 
 EXPOSE 8080
 
-# Run as a non-root user
-RUN useradd -m -u 10001 mcp && chown -R mcp:mcp /app
+# Run as a non-root user. The upload staging directory has to be created HERE, while
+# we are still root: the server runs as uid 10001 and cannot mkdir under /var/lib, so
+# without this every POST /upload fails with a permission error (and `mkdir -p` inside
+# the running container fails the same way). If you bind-mount a host directory over
+# it, that directory must also be writable by uid 10001.
+RUN useradd -m -u 10001 mcp \
+    && mkdir -p /var/lib/brainkb-uploads \
+    && chown -R mcp:mcp /app /var/lib/brainkb-uploads
 USER mcp
 
 # Liveness: the MCP HTTP port accepts connections.
