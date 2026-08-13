@@ -48,9 +48,6 @@ services:
       # host.docker.internal (mapped below for Linux). Overridable from .env.
       BRAINKB_URL: ${BRAINKB_URL:-http://host.docker.internal:8010}
       USERMANAGEMENT_URL: ${USERMANAGEMENT_URL:-http://host.docker.internal:8004}
-      # Large-file ingest without touching the caller's context: the server fetches
-      # the URL itself. Empty disables the tool (a server-side fetch of a supplied
-      # URL is SSRF), so name the hosts you will serve files from.
       # POST /upload: the client streams a file straight to the server, which then
       # ingests it internally. Persist the staging dir if you want uploads to
       # survive a restart (see the volumes entry below).
@@ -59,9 +56,6 @@ services:
       MCP_UPLOAD_MAX_BYTES: ${MCP_UPLOAD_MAX_BYTES:-5000000000}
       MCP_UPLOAD_TOTAL_BYTES: ${MCP_UPLOAD_TOTAL_BYTES:-20000000000}
       MCP_UPLOAD_TTL_MIN: ${MCP_UPLOAD_TTL_MIN:-360}
-      MCP_INGEST_URL_ALLOWLIST: ${MCP_INGEST_URL_ALLOWLIST:-}
-      MCP_MAX_INGEST_URL_BYTES: ${MCP_MAX_INGEST_URL_BYTES:-1000000000}
-      MCP_INGEST_URL_ALLOW_HTTP: ${MCP_INGEST_URL_ALLOW_HTTP:-false}
     # First entry: only if you set MCP_INGEST_ROOT (remote file ingest) — the
     # container path must match it exactly, and ro so ingest can't write into it.
     # Second: persist POST /upload's staging area, so a restart mid-upload doesn't
