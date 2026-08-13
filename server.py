@@ -389,6 +389,20 @@ def _parse_allowed() -> Dict[str, Optional[str]]:
 _ALLOWED_BASES: Dict[str, Optional[str]] = _parse_allowed()
 
 
+def _host_local(url: str) -> bool:
+    """True if `url` never leaves the machine — loopback, or Docker's host bridge.
+
+    Deliberately separate from `_is_loopback`, which decides whether a
+    caller-supplied base URL is permitted under stdio. Widening a security predicate
+    to quiet a startup warning is how a check stops meaning what its name says.
+    """
+    try:
+        host = httpx.URL(url).host
+    except Exception:
+        return False
+    return _is_loopback(url) or host in ("host.docker.internal", "host-gateway")
+
+
 def _is_loopback(url: str) -> bool:
     try:
         return httpx.URL(url).host in ("localhost", "127.0.0.1", "::1")
@@ -2184,9 +2198,15 @@ def _startup_warnings() -> None:
              "limits key on the socket peer. Behind a proxy that means all callers "
              "share one bucket; set it to your proxy's IP(s) or subnet CIDR(s).")
     if _INGEST_ROOT:
-        warn(f"brainkb_ingest_files may read from {_INGEST_ROOT!r} on the SERVER's "
-             "filesystem. Ensure it holds nothing callers shouldn't retrieve.")
-    if _DEFAULT_URL.startswith("http://") and not _is_loopback(_DEFAULT_URL):
+        # Worth saying once at startup, because the consequence is not obvious: a
+        # file under this root can be ingested into a graph and then read straight
+        # back out with brainkb_read_space. So the root has to be a dedicated upload
+        # directory, not a data volume that happens to contain RDF.
+        warn(f"brainkb_ingest_files may read anything under {_INGEST_ROOT!r} on the "
+             "SERVER's filesystem, and callers can read it back out of the graph "
+             "afterwards. Keep it a dedicated upload dir. Not needed for a caller's "
+             "own file — that is POST /upload.")
+    if _DEFAULT_URL.startswith("http://") and not _host_local(_DEFAULT_URL):
         warn(f"BRAINKB_URL is plaintext HTTP ({_DEFAULT_URL}) — bearer tokens will "
              "cross the network unencrypted.")
 
