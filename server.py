@@ -22,7 +22,7 @@ Configuration (env, all optional):
 Hardening knobs for the hosted (streamable-http) remote:
   MCP_ALLOWED_BASE_URLS    Comma-separated backends a caller may target, each
                            optionally paired with its usermanagement URL:
-                           'https://queryservice.brainkb.org=https://usermanagement.brainkb.org'.
+                           'https://queryservice.example.org=https://usermanagement.example.org'.
                            BRAINKB_URL is always allowed. Anything else is
                            refused — the base URL is the destination of requests
                            that carry credentials, so an arbitrary value is both
@@ -35,6 +35,13 @@ Hardening knobs for the hosted (streamable-http) remote:
   MCP_INGEST_ROOT          Directory brainkb_ingest_files may read from. File
                            ingest is disabled on the remote unless this is set,
                            because paths resolve on the SERVER's filesystem.
+  MCP_INGEST_URL_ALLOWLIST Hosts brainkb_ingest_url may fetch from ('.s3.amazonaws.com'
+                           matches any subdomain). Empty by default, which disables
+                           the tool: a server-side fetch of a caller-supplied URL is
+                           SSRF. This is how a LARGE file is ingested on the remote —
+                           the bytes go URL -> server -> REST API, never through a
+                           caller's context, so there is nothing to transcribe and no
+                           reason to split the document.
   MCP_ALLOW_SHARED_IDENTITY  Opt in to BRAINKB_TOKEN as an ambient identity
                            (single-user HTTP deployments only).
 
@@ -49,6 +56,7 @@ or returned to the model.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import ipaddress
 import os
@@ -357,7 +365,7 @@ class _NotAuthed(RuntimeError):
 #
 # MCP_ALLOWED_BASE_URLS is a comma-separated list of query_service base URLs, each
 # optionally paired with its usermanagement URL:
-#     MCP_ALLOWED_BASE_URLS=https://queryservice.brainkb.org=https://usermanagement.brainkb.org,http://localhost:8011
+#     MCP_ALLOWED_BASE_URLS=https://queryservice.example.org=https://usermanagement.example.org,http://localhost:8011
 
 def _norm_base(u: Optional[str]) -> str:
     return (u or "").strip().rstrip("/")
@@ -464,7 +472,7 @@ def _um_base(base: str) -> str:
 
     `base` must already have passed _allowed_base(). The port rewrite below is only
     a convenience for the dev layout (:8010 -> :8004); it cannot be relied on for a
-    real deployment (e.g. https://queryservice.brainkb.org has no :8010, and the old code
+    real deployment (e.g. https://queryservice.example.org has no :8010, and the old code
     silently sent usermanagement traffic — PAT exchanges, admin calls — to the
     query_service host instead). Configure the pairing explicitly there.
     """
@@ -704,10 +712,22 @@ def _seg(value: str) -> str:
     return quote((value or "").strip(), safe="")
 
 
-def _path_ok(path: str) -> bool:
+def _path_ok(path: str, *, allow_trailing_slash: bool = False) -> bool:
     """False if a request path contains an empty or dot segment — i.e. something
-    that would traverse to a different endpoint than the tool intended."""
-    return not any(p in ("", ".", "..") for p in path.split("/")[1:])
+    that would traverse to a different endpoint than the tool intended.
+
+    allow_trailing_slash is for the handful of backend routes that are DECLARED
+    with a trailing slash (e.g. query_service's '/api/query/sparql/'), where the
+    final empty segment is part of the literal template rather than an
+    interpolated value. It is opt-in per call, not the default, because a trailing
+    empty segment from an *interpolated* value is exactly the dangerous case:
+    f"/api/auth/tokens/{_seg(token_id)}" with an empty id would silently address
+    the collection instead of one item.
+    """
+    segs = path.split("/")[1:]
+    if allow_trailing_slash and segs and segs[-1] == "":
+        segs = segs[:-1]
+    return not any(p in ("", ".", "..") for p in segs)
 
 
 _BAD_PATH = {"error": True, "status_code": 400,
@@ -727,8 +747,9 @@ def _result(resp: httpx.Response) -> Any:
     return {"error": True, "status_code": resp.status_code, "detail": body}
 
 
-def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    if not _path_ok(path):
+def _get(path: str, params: Optional[Dict[str, Any]] = None, *,
+         allow_trailing_slash: bool = False) -> Any:
+    if not _path_ok(path, allow_trailing_slash=allow_trailing_slash):
         return dict(_BAD_PATH)
     if not _rate_ok("read", _RL_READ):
         return _rl_error("read", _RL_READ)
@@ -975,8 +996,10 @@ def brainkb_logout() -> str:
 
 @mcp.tool()
 def brainkb_whoami() -> Dict[str, Any]:
-    """Report the current caller's auth state (base URL, email, authenticated, and
-    when the cached session expires)."""
+    """Report the current caller's auth state (email, authenticated, and when the
+    cached session expires). When signed in it also returns base_url — the backend
+    THIS SERVER talks to, which on a hosted deployment is an internal address and
+    says nothing about the caller's own machine."""
     # Rate-limited like a read: resolving auth can trigger a token exchange against
     # the backend, so an unmetered whoami is a request amplifier.
     if not _rate_ok("read", _RL_READ):
@@ -990,9 +1013,21 @@ def brainkb_whoami() -> Dict[str, Any]:
             if exp:
                 out["session_expires_in_min"] = max(0, round((float(exp) - time.time()) / 60))
         return out
-    except _NotAuthed as e:
-        return {"base_url": _DEFAULT_URL, "email": None, "authenticated": False,
-                "hint": "Session may have expired — log in again (brainkb_login / brainkb_globus_login)."}
+    except _NotAuthed:
+        # No base_url here. It is the SERVER's backend, and on the hosted remote it
+        # is an internal address (host.docker.internal:8010) — handing that to an
+        # anonymous caller discloses deployment topology, and assistants misread it
+        # as "the user is pointed at their own local stack" and warn about the wrong
+        # thing. The hint is a single instruction rather than a menu: from a cold
+        # start OAuth is the only path that works, so offering a choice of methods
+        # just costs the user a round trip.
+        return {"email": None, "authenticated": False,
+                "hint": ("Not signed in. Call brainkb_globus_login() and give the "
+                         "user the URL it returns; they sign in and paste back the "
+                         "short code for brainkb_finish_login(code). Then mint a "
+                         "PAT with brainkb_create_token(name, days) so the next "
+                         "session needs no browser. Do not ask the user to choose "
+                         "an auth method, and do not ask for a password.")}
 
 
 # --------------------------------------------------------------------------- #
@@ -1129,6 +1164,66 @@ def brainkb_add_space_graph(slug: str, named_graph_iri: str, description: str = 
 # unless MCP_INGEST_ROOT confines it to a directory.
 _INGEST_ROOT = os.getenv("MCP_INGEST_ROOT", "").strip()
 
+# --- ingest-from-URL ------------------------------------------------------- #
+# The gap this closes: on a hosted remote, brainkb_ingest_files reads the SERVER's
+# filesystem, so a file on the caller's machine cannot be ingested at all — and the
+# only alternative, retyping the RDF into brainkb_ingest_text, is a fidelity gamble
+# on an append-only store. Fetching by URL keeps the bytes entirely server-side:
+# they go URL -> this process -> the REST API, never through a model's context.
+#
+# It is also a textbook SSRF primitive, so it is off unless an operator names the
+# hosts it may fetch from, exactly like MCP_ALLOWED_BASE_URLS. Host suffixes are
+# allowed ('.s3.amazonaws.com' matches any bucket host under it).
+_INGEST_URL_HOSTS = tuple(
+    h.strip().lower().lstrip(".")
+    for h in os.getenv("MCP_INGEST_URL_ALLOWLIST", "").split(",")
+    if h.strip()
+)
+# Cap on a fetched body. The backend accepts multi-GB uploads, but an unbounded
+# fetch is a disk-exhaustion lever on a shared host.
+_MAX_INGEST_URL_BYTES = _int_env("MCP_MAX_INGEST_URL_BYTES", 1_000_000_000)
+_INGEST_URL_ALLOW_HTTP = os.getenv(
+    "MCP_INGEST_URL_ALLOW_HTTP", "false").strip().lower() in ("1", "true", "yes")
+# Suffixes the ingest endpoint understands. Used only to name the uploaded part
+# sensibly — the backend decides the real format.
+_RDF_SUFFIXES = (".ttl", ".nt", ".nq", ".n3", ".rdf", ".owl", ".xml",
+                 ".jsonld", ".json", ".trig", ".gz")
+
+
+def _host_allowed(host: str) -> bool:
+    """True if `host` is exactly an allowlisted host or sits under one."""
+    host = (host or "").lower().rstrip(".")
+    return any(host == h or host.endswith("." + h) for h in _INGEST_URL_HOSTS)
+
+
+def _public_ip(host: str) -> Optional[str]:
+    """Resolve `host` and return the reason it is NOT fetchable, or None if it is.
+
+    Every resolved address must be public. A hostname that resolves to a private,
+    loopback, link-local or reserved address is the SSRF case this exists for — it
+    is how a fetch becomes a read of the cloud metadata service (169.254.169.254),
+    a sibling container, or the backend's own admin port.
+    """
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        return f"could not resolve {host!r} ({exc})"
+    if not infos:
+        return f"could not resolve {host!r}"
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return f"{host!r} resolved to an unusable address {addr!r}"
+        if not ip.is_global or ip.is_multicast:
+            return (f"{host!r} resolves to the non-public address {addr} — refused "
+                    "(this is the SSRF case: private, loopback, link-local and "
+                    "metadata addresses are never fetched)")
+    return None
+
 
 def _ingest_path(p: str) -> str:
     """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
@@ -1143,30 +1238,209 @@ def _ingest_path(p: str) -> str:
                 f"{p!r} is outside the permitted ingest directory (MCP_INGEST_ROOT)."
             )
     elif _IS_REMOTE:
+        # Do NOT suggest brainkb_ingest_text here. This message used to, and the
+        # advice is actively harmful for a file: a caller followed it, tried to
+        # reproduce a 2.7 MB Turtle export through the tool argument, split it to
+        # fit, and came within one call of writing silently-detached triples into an
+        # append-only graph (the first splitter alone lost 2,070 triples, and
+        # splitting at all breaks blank-node identity across calls).
         raise PermissionError(
-            "File ingest is disabled on the hosted remote because file paths are "
-            "read from the SERVER's filesystem, not yours. Use brainkb_ingest_text "
-            "instead, or ask the operator to set MCP_INGEST_ROOT to a directory "
-            "that may be ingested from."
+            "File ingest is disabled on the hosted remote: paths are read from the "
+            "SERVER's filesystem, not yours, so this server cannot see your file. "
+            "Ask the operator to set MCP_INGEST_ROOT to an ingest directory (plus "
+            "the matching bind mount) and place the file there. Do NOT re-type the "
+            "file's RDF into brainkb_ingest_text: ingest is append-only, dense "
+            "Turtle does not survive transcription intact, and splitting it across "
+            "calls silently breaks blank nodes. brainkb_ingest_text is for RDF you "
+            "authored in-session, and takes sha256= so even that is checked."
         )
     if not os.path.isfile(rp):
         raise PermissionError(f"{p!r} is not a regular file.")
     return rp
 
 @mcp.tool()
-def brainkb_ingest_text(named_graph_iri: str, data: str) -> Any:
+def brainkb_ingest_text(named_graph_iri: str, data: str,
+                        sha256: str = "", expected_bytes: int = 0) -> Any:
     """Ingest raw RDF text (Turtle / N-Triples / JSON-LD, auto-detected) into a
     named graph. Returns a job_id; ingestion runs in the background — poll with
     brainkb_job_status. The graph must be registered (see brainkb_add_space_graph)
-    and the caller must have write access to its space."""
+    and the caller must have write access to its space.
+
+    `sha256` / `expected_bytes` are an integrity contract, and you should use them
+    whenever the RDF came from a file. Ingest is append-only — no delete for
+    triples, no unregister for a graph — so RDF that arrives here mangled is
+    permanent. Because `data` is a string, it passes through the caller's context,
+    where dense Turtle is exactly what gets silently altered: ligatures, Greek
+    letters, embedded newlines, escaped quotes. Declare the digest of the bytes you
+    MEANT to send (`shasum -a 256 file.ttl`) and this refuses the write on any
+    mismatch, turning an unrecoverable corruption into a clean rejection.
+    """
     payload = data.encode("utf-8")
+    if expected_bytes and len(payload) != expected_bytes:
+        return {"error": True, "status_code": 400,
+                "detail": (f"Byte-count mismatch: declared {expected_bytes}, "
+                           f"received {len(payload)}. Nothing was written. The "
+                           "payload was truncated or altered in transit — send the "
+                           "file's bytes without passing them through a model, or "
+                           "use file ingest.")}
+    if sha256:
+        got = hashlib.sha256(payload).hexdigest()
+        want = sha256.strip().lower()
+        if got != want:
+            return {"error": True, "status_code": 400,
+                    "detail": (f"Digest mismatch: declared {want}, received {got} "
+                               f"({len(payload)} bytes). Nothing was written — this "
+                               "is the guard working. Do not retry by re-typing the "
+                               "RDF; put the file where the server can read it "
+                               "(MCP_INGEST_ROOT) and use brainkb_ingest_files.")}
     if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
         return {"error": True, "status_code": 413,
                 "detail": (f"Payload too large ({len(payload)} bytes > "
-                           f"{_MAX_INGEST_BYTES}). Split it or use file ingest.")}
+                           f"{_MAX_INGEST_BYTES}). Use file ingest — do NOT split "
+                           "the RDF across calls: blank-node labels are scoped to "
+                           "one document, so a bnode shared by two calls becomes "
+                           "two distinct nodes and the triples silently detach.")}
     return _post("/api/insert/raw/knowledge-graph-triples",
                  params={"user_id": _me(), "named_graph_iri": named_graph_iri},
                  content=payload, ctype="text/plain")
+
+
+@mcp.tool()
+def brainkb_ingest_url(named_graph_iri: str, url: str, sha256: str = "",
+                       filename: str = "") -> Any:
+    """Ingest an RDF file that this server fetches from `url` itself.
+
+    This is how to ingest a LARGE file on the hosted remote. The bytes go
+    URL -> this server -> the ingest API and never pass through the caller's
+    context, so there is no transcription risk, no size ceiling imposed by a context
+    window, and no reason to split the document (splitting breaks blank-node
+    identity, which corrupts an append-only graph silently).
+
+    Put the file anywhere the server can reach over HTTPS — an S3/GCS presigned URL,
+    a release asset, an internal artifact store — and pass that URL. Give `sha256`
+    (`shasum -a 256 file.ttl`) whenever you can: it is verified after download and
+    before anything is written.
+
+    Returns a job_id; ingestion runs in the background — poll brainkb_job_status,
+    then reconcile brainkb_delta(job_id) against the triple count you expected.
+
+    Requires the operator to have set MCP_INGEST_URL_ALLOWLIST, because fetching an
+    arbitrary URL server-side is SSRF. Redirects are not followed: a redirect can
+    move the request to a host the allowlist never approved.
+    """
+    if not _INGEST_URL_HOSTS:
+        return {"error": True, "status_code": 403,
+                "detail": ("URL ingest is disabled: no MCP_INGEST_URL_ALLOWLIST is "
+                           "configured. Ask the operator to allowlist the host(s) "
+                           "you will serve files from (e.g. "
+                           "MCP_INGEST_URL_ALLOWLIST=.s3.amazonaws.com,files.example.org). "
+                           "Until then, the supported path for a large file is "
+                           "MCP_INGEST_ROOT + brainkb_ingest_files.")}
+    try:
+        parsed = httpx.URL(url)
+    except Exception as exc:
+        return {"error": True, "status_code": 400, "detail": f"unusable url: {exc}"}
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("https", "http"):
+        return {"error": True, "status_code": 400,
+                "detail": f"only http(s) urls may be fetched, got {scheme!r}"}
+    if scheme == "http" and not _INGEST_URL_ALLOW_HTTP:
+        return {"error": True, "status_code": 400,
+                "detail": ("refusing a plaintext http url — the fetch would be "
+                           "readable and tamperable in transit. Use https, or set "
+                           "MCP_INGEST_URL_ALLOW_HTTP=true for a trusted internal "
+                           "host.")}
+    host = parsed.host or ""
+    if not _host_allowed(host):
+        return {"error": True, "status_code": 403,
+                "detail": (f"host {host!r} is not in MCP_INGEST_URL_ALLOWLIST "
+                           f"({', '.join(_INGEST_URL_HOSTS)}). The allowlist is the "
+                           "whole security boundary here, so it is not bypassable "
+                           "per call.")}
+    bad = _public_ip(host)
+    if bad:
+        return {"error": True, "status_code": 403, "detail": bad}
+
+    name = os.path.basename(filename or parsed.path or "") or "ingest.ttl"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120]
+    if not name.lower().endswith(_RDF_SUFFIXES):
+        name += ".ttl"
+
+    import tempfile
+
+    digest = hashlib.sha256()
+    total = 0
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="brainkb-ingest-", suffix="-" + name,
+                                         delete=False) as fh:
+            tmp = fh.name
+            # Streamed, so a multi-GB file never has to fit in memory, and the cap
+            # can be enforced mid-transfer rather than after the damage.
+            with httpx.Client(timeout=_UPLOAD_TIMEOUT,
+                              follow_redirects=False) as c:
+                with c.stream("GET", url) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        return {"error": True, "status_code": 400,
+                                "detail": (f"{url} redirected to "
+                                           f"{resp.headers.get('location')!r}. "
+                                           "Redirects are not followed — pass the "
+                                           "final URL so the allowlist applies to "
+                                           "the host actually fetched.")}
+                    if resp.status_code >= 400:
+                        return {"error": True, "status_code": resp.status_code,
+                                "detail": f"fetch failed: HTTP {resp.status_code}"}
+                    ctype = (resp.headers.get("content-type") or "").lower()
+                    first = b""
+                    for chunk in resp.iter_bytes(1 << 20):
+                        if not first:
+                            first = chunk[:200]
+                        total += len(chunk)
+                        if _MAX_INGEST_URL_BYTES and total > _MAX_INGEST_URL_BYTES:
+                            return {"error": True, "status_code": 413,
+                                    "detail": (f"fetch exceeded "
+                                               f"{_MAX_INGEST_URL_BYTES} bytes "
+                                               "(MCP_MAX_INGEST_URL_BYTES)")}
+                        digest.update(chunk)
+                        fh.write(chunk)
+        if total == 0:
+            return {"error": True, "status_code": 400, "detail": "fetched 0 bytes"}
+        # A login wall or an expired presigned URL answers 200 with HTML, which the
+        # ingest job would then fail on far downstream. Catch it here, where the
+        # error can still name the cause.
+        head = first.decode("utf-8", "replace").lstrip().lower()
+        if head.startswith(("<!doctype html", "<html")) or "text/html" in ctype:
+            return {"error": True, "status_code": 400,
+                    "detail": (f"{url} returned HTML, not RDF (content-type "
+                               f"{ctype or 'unknown'}). An expired presigned URL or "
+                               "a login page is the usual cause.")}
+        got = digest.hexdigest()
+        if sha256 and got != sha256.strip().lower():
+            return {"error": True, "status_code": 400,
+                    "detail": (f"digest mismatch: declared {sha256.strip().lower()}, "
+                               f"fetched {got} ({total} bytes). Nothing was written "
+                               "— the URL is not serving the file you hashed.")}
+        with open(tmp, "rb") as fh:
+            out = _post("/api/insert/files/knowledge-graph-triples",
+                        params={"user_id": _me(),
+                                "named_graph_iri": named_graph_iri},
+                        files=[("files", (name, fh, "application/octet-stream"))],
+                        timeout=_UPLOAD_TIMEOUT)
+        if isinstance(out, dict):
+            out.setdefault("fetched", {})
+            out["fetched"] = {"url": url, "bytes": total, "sha256": got,
+                              "uploaded_as": name}
+        return out
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    except Exception as e:
+        return {"error": True, "detail": f"fetch/ingest failed: {e}"}
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 @mcp.tool()
@@ -1258,8 +1532,13 @@ def brainkb_list_registered_graphs() -> Any:
 
 @mcp.tool()
 def brainkb_sparql(sparql_query: str) -> Any:
-    """Run an arbitrary SPARQL query (requires the 'admin' scope)."""
-    return _get("/api/query/sparql/", params={"sparql_query": sparql_query})
+    """Run an arbitrary SPARQL query. Requires an Admin/SuperAdmin role (the
+    sparql_admin capability) — for ordinary questions prefer brainkb_search,
+    brainkb_read_space, or the provenance/delta tools, which need no admin role."""
+    # query_service declares this route WITH a trailing slash, so the guard has to
+    # tolerate the final empty segment here (it is literal, not interpolated).
+    return _get("/api/query/sparql/", params={"sparql_query": sparql_query},
+                allow_trailing_slash=True)
 
 
 # --------------------------------------------------------------------------- #
