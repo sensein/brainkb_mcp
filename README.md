@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/sensein-brainkb-mcp-badge.png)](https://mseep.ai/app/sensein-brainkb-mcp)
+
 # BrainKB MCP server
 
 An [MCP](https://modelcontextprotocol.io) server that exposes the BrainKB
