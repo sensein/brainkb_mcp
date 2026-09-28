@@ -993,4 +993,85 @@ LIMIT {{limit}}
 ################################################################################
 # End CQ12
 ################################################################################
- 
+
+################################################################################
+# Optional user parameter query
+# CQ13 — Quantitative evidence per cause–effect pair
+################################################################################
+
+register(QAQuery(
+    id="ne_causal_effect_estimates",
+    category=CATEGORY,
+    question="What quantitative effect estimates are recorded for cause–effect pairs?",
+    notes=(
+        "Use for requests such as "
+        "'Show quantitative evidence for causal claims'; "
+        "'List effect sizes with p-values and sample sizes'; "
+        "'What measurements support each cause–effect pair?'; "
+        "'Retrieve effect estimates for meta-analysis preparation'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "Returns ?causeKey (normalized cause key), "
+        "?effectKey (normalized effect key), ?measure (effect measure), "
+        "?value (recorded effect value), ?p (optional p-value), and "
+        "?n (optional sample size). "
+        "Retrieves estimates attached to each claim's current "
+        "causal-relation version; historical versions are not included. "
+        "Requires normalized cause/effect keys, an effect measure, and "
+        "an effect value. Estimates lacking p-values or sample sizes "
+        "remain visible with those fields unbound. "
+        "Missing values must not be interpreted as zero. "
+        "Each claim can have multiple estimates. Separate claims or "
+        "estimates may produce identical displayed rows because their "
+        "IRIs and source identifiers are not selected. Do not assume "
+        "such rows are duplicates or independent observations. "
+        "These results are a starting point for evidence review, not "
+        "automatically poolable meta-analysis data. Before combining "
+        "estimates, verify source provenance, study independence, measure "
+        "definitions, units, direction, uncertainty, and study context. "
+        "Negation and hypotheticality flags are not selected; a returned "
+        "estimate alone does not establish an affirmative causal finding. "
+        "The query covers all qualifying estimates in "
+        "https://www.brainkb.org/named-entity/. Requests about a specific "
+        "entity, source, measure, or significance threshold require "
+        "additional filters. "
+        "The limit applies to result rows, not distinct claims or studies. "
+        "An empty result means no records match the required estimate "
+        "patterns, not that the source documents contain no quantitative evidence."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT ?causeKey ?effectKey ?measure ?value ?p ?n
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
+         ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
+         ner:hasCurrentCausalRelationVersion ?v .
+
+    ?v ner:hasEffectEstimate ?est .
+
+    ?est ner:effectMeasure ?measure ;
+         ner:effectValue ?value .
+
+    OPTIONAL { ?est ner:pValue ?p }
+    OPTIONAL { ?est ner:sampleSize ?n }
+  }
+}
+ORDER BY ?causeKey ?effectKey ?measure ?rel ?est ?value ?p ?n
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of quantitative-evidence rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ13
+################################################################################
