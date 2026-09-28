@@ -993,36 +993,4 @@ LIMIT {{limit}}
 ################################################################################
 # End CQ12
 ################################################################################
-
-# EXAMPLE — a query that needs input from the user. `name` has no default, so
-# brainkb_qa_run refuses to run without it ("missing required parameter: name").
-# register(QAQuery(
-#     id="ne_find_entity_by_label",
-#     category=CATEGORY,
-#     question="Which entities have a label matching a given name, and what are their IRIs and types?",
-#     notes=(
-#         "REQUIRES INPUT: `name`, the text the user typed (e.g. 'hippocampus'). "
-#         "Ask the user for it if they have not given one — do not guess. Matching "
-#         "is case-insensitive substring on rdfs:label. Use this to turn a name into "
-#         "an IRI before calling IRI-based queries such as ne_entities_of_type. "
-#         "Returns ?entity, ?label and ?type (may be empty); several rows per entity "
-#         "if it has several types."
-#     ),
-#     example={"name": "pyramidal", "limit": 20},
-#     sparql="""
-# PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-# PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-#
-# SELECT DISTINCT ?entity ?label ?type WHERE {
-#   ?entity rdfs:label ?label .
-#   FILTER(CONTAINS(LCASE(STR(?label)), LCASE({{name}})))
-#   OPTIONAL { ?entity rdf:type ?type }
-# }
-# LIMIT {{limit}}
-# """,
-#     params=(
-#         QAParam("name", "string", "Text to look for in entity labels, e.g. 'hippocampus'."),
-#         QAParam("limit", "int", "Maximum number of rows to return.",
-#                 default=100, minimum=1, maximum=1000),
-#     ),
-# ))
+ 
