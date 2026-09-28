@@ -720,6 +720,105 @@ LIMIT {{limit}}
 ))
 
 ################################################################################
+# Optional user parameter query
+# CQ10 — Tier distribution per external ontology
+################################################################################
+
+register(QAQuery(
+    id="ne_mapping_tiers_by_ontology",
+    category=CATEGORY,
+    question="How are entity mappings distributed across mapping tiers for each external ontology?",
+    notes=(
+        "Use for requests such as "
+        "'Show mapping tiers by ontology'; "
+        "'How many exact versus close matches does each ontology have?'; "
+        "'Which ontologies mostly provide broader or related matches?'; "
+        "'Summarize external ontology alignment for this corpus'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "Returns ?acr (ontology acronym), ?tier (exact, close, broad, "
+        "narrow, or related), and ?n (number of distinct entity-target "
+        "mapping pairs for that ontology and tier). "
+        "Counts distinct combinations of entity IRI, target IRI, ontology "
+        "acronym, and tier before aggregation, preventing repeated "
+        "ontology-version metadata from inflating totals. "
+        "An entity mapped to several targets contributes multiple pairs. "
+        "A pair recorded under multiple tiers contributes to each tier. "
+        "Counts are not mention counts or source-document counts. "
+        "Excludes BRAINKB ontology metadata case-insensitively. "
+        "Requires the target's concept IRI and ontology-acronym metadata; "
+        "mappings without that metadata are not counted. "
+        "The distribution can identify alignment patterns worth reviewing, "
+        "but does not independently establish ontology granularity or "
+        "mapping quality. Mapping tiers are relationships, not confidence scores. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The limit applies to aggregated ontology-tier rows after counting. "
+        "Absent ontology-tier combinations are omitted rather than shown "
+        "with zero counts. An empty result means no mappings match the "
+        "required entity, target-metadata, and external-ontology patterns."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+
+SELECT ?acr ?tier (COUNT(*) AS ?n)
+WHERE {
+  {
+    SELECT DISTINCT ?e ?term ?acr ?tier
+    WHERE {
+      GRAPH <https://www.brainkb.org/named-entity/> {
+        {
+          { ?e skos:exactMatch ?term . BIND("exact" AS ?tier) }
+          UNION
+          { ?e skos:closeMatch ?term . BIND("close" AS ?tier) }
+          UNION
+          { ?e skos:broadMatch ?term . BIND("broad" AS ?tier) }
+          UNION
+          { ?e skos:narrowMatch ?term . BIND("narrow" AS ?tier) }
+          UNION
+          { ?e skos:relatedMatch ?term . BIND("related" AS ?tier) }
+        }
+
+        ?e a ner:NamedEntity .
+      }
+
+      {
+        SELECT DISTINCT ?term ?acr
+        WHERE {
+          GRAPH <https://www.brainkb.org/named-entity/> {
+            ?concept ner:conceptIRI ?iri ;
+                     ner:conceptInOntologyVersion/
+                     ner:versionOfOntology/
+                     ner:ontologyAcronym ?acr .
+
+            FILTER(UCASE(STR(?acr)) != "BRAINKB")
+            BIND(IRI(STR(?iri)) AS ?term)
+          }
+        }
+      }
+    }
+  }
+}
+GROUP BY ?acr ?tier
+ORDER BY ?acr DESC(?n) ?tier
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of aggregated ontology-tier rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ10
+################################################################################
+
+################################################################################
 # End CQ9
 ################################################################################
 
