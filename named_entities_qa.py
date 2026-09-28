@@ -1075,3 +1075,80 @@ LIMIT {{limit}}
 ################################################################################
 # End CQ13
 ################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ 14 - When was each entity first mentioned in dated sources, and in how many?
+################################################################################
+
+register(QAQuery(
+    id="ne_entity_first_source_year",
+    category=CATEGORY,
+    question="What is the earliest source year recorded for each entity, and how many dated sources mention it?",
+    notes=(
+        "Use for requests such as "
+        "'When does each entity first appear in the corpus?'; "
+        "'What is the earliest paper mentioning each entity?'; "
+        "'How many dated sources mention each entity?'; "
+        "'List entities by their earliest recorded source year'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "Returns ?e (canonical entity IRI), ?key (normalized entity key), "
+        "?first (earliest valid source year), and "
+        "?papers (distinct sources with a usable year). "
+        "Reads ner:publicationDate or dcterms:issued and converts the "
+        "first four characters to an integer year. "
+        "Sources without a usable year are excluded from both the "
+        "earliest-year calculation and the source count. "
+        "Multiple date values for one source do not increase its source "
+        "count, but the earliest usable year contributes to the minimum. "
+        "The earliest year is relative to the loaded corpus; it is not "
+        "necessarily the entity's discovery date or first mention anywhere. "
+        "These are source dates, not extraction dates or dates of biological events. "
+        "The query returns the earliest year, not the identity of the "
+        "earliest paper; retrieving that paper requires an additional query. "
+        "Sources may include documents other than papers. "
+        "The query covers all qualifying entities in "
+        "https://www.brainkb.org/named-entity/. "
+        "A specific entity or date range requires additional filters. "
+        "An empty result means no entities have source-provenance links "
+        "to documents with usable years."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?e ?key
+       (MIN(?year) AS ?first)
+       (COUNT(DISTINCT ?pub) AS ?papers)
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e ner:normalizedEntityKey ?key ;
+       prov:hadPrimarySource ?pub .
+
+    ?pub (ner:publicationDate|dcterms:issued) ?date .
+
+    BIND(xsd:integer(SUBSTR(STR(?date), 1, 4)) AS ?year)
+    FILTER(BOUND(?year))
+  }
+}
+GROUP BY ?e ?key
+ORDER BY ?first ?key ?e
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of entity-level result rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ 14
+################################################################################
