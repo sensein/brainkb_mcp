@@ -1152,3 +1152,85 @@ LIMIT {{limit}}
 ################################################################################
 # End CQ 14
 ################################################################################
+
+################################################################################
+# Optional user parameter query — result limit only
+# CQ15 — Hypotheticality of claims about effects, by claim-source year
+################################################################################
+
+register(QAQuery(
+    id="ne_effect_claims_by_source_year",
+    category=CATEGORY,
+    question="What hypotheticality is recorded for claims about effects, by claim-source year?",
+    notes=(
+        "Use for requests such as "
+        "'Show hypothetical causal claims by source year'; "
+        "'How are claims about effects characterized across publication years?'; "
+        "'List causes, effects, and hypotheticality flags by year'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "The effect-key filter is unset using UNDEF, so all qualifying "
+        "effects are included. This registration has no effect-key parameter. "
+        "A request about a specific effect requires an additional filter. "
+        "Returns ?pub (claim-source IRI), ?effectKey, ?year (source year), "
+        "?doi (optional source DOI), ?causeKey, and ?hypothetical. "
+        "Source attribution comes from the causal claim, not from the "
+        "cause or effect entity. Hypotheticality comes from the claim's "
+        "current causal-relation version. "
+        "True records a hypothetical claim; false does not independently "
+        "establish experimental intervention, truth, or scientific consensus. "
+        "Years are derived from ner:publicationDate or dcterms:issued. "
+        "Sources without either date property are omitted. If a date "
+        "cannot be converted to an integer year, its row can remain with "
+        "?year unbound. Sources without DOIs remain visible. "
+        "Source years are not claim-revision timestamps; this query does "
+        "not reconstruct changes to a claim over time. "
+        "Multiple dates or separate claims can produce multiple rows. "
+        "Identical displayed rows do not necessarily represent duplicate claims. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "An empty result means no records match the required claim, "
+        "entity-key, hypotheticality, and source-date patterns."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?pub ?effectKey ?year ?doi ?causeKey ?hypothetical
+WHERE {
+  VALUES ?requestedKey { UNDEF }
+  FILTER(!BOUND(?requestedKey) || ?effectKey = ?requestedKey)
+
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?rel ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
+         ner:hasCause ?c ;
+         ner:hasCurrentCausalRelationVersion/
+         ner:causalHypothetical ?hypothetical .
+
+    ?c ner:normalizedEntityKey ?causeKey .
+    ?rel prov:hadPrimarySource ?pub .
+
+    OPTIONAL { ?pub ner:doi ?doi }
+
+    ?pub (ner:publicationDate|dcterms:issued) ?date .
+    BIND(xsd:integer(SUBSTR(STR(?date), 1, 4)) AS ?year)
+  }
+}
+ORDER BY ?year
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of claim-source-year rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ15
+################################################################################
