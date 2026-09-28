@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib
 import ipaddress
 import json as jsonlib
 import os
@@ -71,6 +72,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
+import qa_registry
 from mcp.server.fastmcp import FastMCP
 
 # Registry identity (https://registry.modelcontextprotocol.io — "org.brainkb/brainkb").
@@ -1781,6 +1783,66 @@ def brainkb_sparql(sparql_query: str) -> Any:
     # query_service declares this route WITH a trailing slash, so the guard has to
     # tolerate the final empty segment here (it is literal, not interpolated).
     return _get("/api/query/sparql/", params={"sparql_query": sparql_query},
+                allow_trailing_slash=True)
+
+
+# --------------------------------------------------------------------------- #
+# canned QA queries (see qa_registry.py and guide.md)
+# --------------------------------------------------------------------------- #
+
+# Each module registers its QAQuery objects on import. A new category is a new
+# module plus one entry here.
+QA_MODULES = ("named_entities_qa",)
+
+for _mod in QA_MODULES:
+    importlib.import_module(_mod)
+
+
+@mcp.tool()
+def brainkb_qa_list(category: str = "", search: str = "") -> Any:
+    """Find a canned question BrainKB can answer, then run it with brainkb_qa_run.
+
+    Prefer these over writing SPARQL: they are vetted against BrainKB's actual
+    vocabulary. Discovery is two steps, so you never read every query at once:
+
+    1. brainkb_qa_list() -> the menu: each category's name, a description of
+       the questions it covers, and how many queries it has. Pick the category
+       whose description matches the user's question.
+    2. brainkb_qa_list(category="<name>") -> that category's queries. Each has
+       `question` (what it answers), `notes` (when to use it, where parameter
+       values come from, what the results mean), `params` (required ones have
+       no default — ask the user rather than guess) and a working `example`.
+
+    `search="words"` filters queries by words in their id/question/notes; use it
+    alone to search every category when none of the descriptions fits.
+    """
+    if category and not qa_registry.has_category(category):
+        return {"error": True, "status_code": 404,
+                "detail": f"Unknown category {category!r}.",
+                "categories": [c["name"] for c in qa_registry.categories()]}
+    if not category and not search:
+        return {"categories": qa_registry.categories(),
+                "next": "Call brainkb_qa_list(category=...) for the queries in one category."}
+    return {"category": category or None, "search": search or None,
+            "queries": qa_registry.list_queries(category, search),
+            "next": "Call brainkb_qa_run(query_id, params) with a query's id."}
+
+
+@mcp.tool()
+def brainkb_qa_run(query_id: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """Run a canned question from brainkb_qa_list by id. `params` maps parameter
+    names to values; they are validated and escaped, never spliced in raw. Runs
+    through the same SPARQL endpoint as brainkb_sparql, so it needs the same
+    role."""
+    q = qa_registry.get(query_id)
+    if q is None:
+        return {"error": True, "status_code": 404,
+                "detail": f"Unknown query id {query_id!r}; see brainkb_qa_list."}
+    try:
+        sparql = q.render(params)
+    except ValueError as e:
+        return {"error": True, "status_code": 400, "detail": str(e)}
+    return _get("/api/query/sparql/", params={"sparql_query": sparql},
                 allow_trailing_slash=True)
 
 
