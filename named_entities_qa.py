@@ -634,35 +634,124 @@ ORDER BY ?key ?e ?tier ?obo
 # End CQ8
 ################################################################################
 
-# EXAMPLE — a query that needs input from the user. `name` has no default, so
-# brainkb_qa_run refuses to run without it ("missing required parameter: name").
+################################################################################
+# Optional user parameter query
+# CQ9 — Which entities lack an external-ontology mapping?
+################################################################################
+
 register(QAQuery(
-    id="ne_find_entity_by_label",
+    id="ne_entities_without_external_mapping",
     category=CATEGORY,
-    question="Which entities have a label matching a given name, and what are their IRIs and types?",
+    question="Which entities lack an external-ontology mapping, including those with only provisional BRAINKB concepts?",
     notes=(
-        "REQUIRES INPUT: `name`, the text the user typed (e.g. 'hippocampus'). "
-        "Ask the user for it if they have not given one — do not guess. Matching "
-        "is case-insensitive substring on rdfs:label. Use this to turn a name into "
-        "an IRI before calling IRI-based queries such as ne_entities_of_type. "
-        "Returns ?entity, ?label and ?type (may be empty); several rows per entity "
-        "if it has several types."
+        "Use for requests such as "
+        "'Which entities are unmapped?'; "
+        "'Show external ontology coverage gaps'; "
+        "'Which entities have only provisional BrainKB mappings?'; "
+        "'Which entities need ontology mapping or curation?'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "Returns ?e (canonical entity IRI), ?cls (entity class), "
+        "?key (normalized entity key), and ?gap (optional entity comment). "
+        "Includes entities without a resolved concept and entities whose "
+        "resolved concepts have only BRAINKB ontology metadata. "
+        "Excludes an entity if any resolved concept is linked through its "
+        "ontology version to an ontology acronym other than BRAINKB, "
+        "compared case-insensitively. "
+        "Entities with both provisional and external mappings are excluded. "
+        "Missing ontology metadata can also cause an entity to appear; "
+        "a result is a coverage-review candidate, not definitive proof "
+        "that no external mapping exists. Direct SKOS mapping edges without "
+        "the resolved-concept metadata path are not checked by this query. "
+        "The gap field contains an existing entity comment, which may not "
+        "specifically explain a mapping failure. "
+        "Excludes the generic ner:NamedEntity class. Multiple classes or "
+        "comments can produce multiple rows for one entity; the limit "
+        "applies to rows, not distinct entities. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "An empty result means no entities match these coverage-gap patterns."
     ),
-    example={"name": "pyramidal", "limit": 20},
+    example={"limit": 1000},
     sparql="""
-PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ner: <https://brainkb.org/ner/>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-SELECT DISTINCT ?entity ?label ?type WHERE {
-  ?entity rdfs:label ?label .
-  FILTER(CONTAINS(LCASE(STR(?label)), LCASE({{name}})))
-  OPTIONAL { ?entity rdf:type ?type }
+SELECT DISTINCT ?e ?cls ?key ?gap
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e a ner:NamedEntity ;
+       ner:normalizedEntityKey ?key ;
+       a ?cls .
+
+    OPTIONAL { ?e rdfs:comment ?gap }
+
+    FILTER(
+      STRSTARTS(STR(?cls), STR(ner:)) &&
+      ?cls != ner:NamedEntity
+    )
+  }
+
+  MINUS {
+    SELECT DISTINCT ?e
+    WHERE {
+      GRAPH <https://www.brainkb.org/named-entity/> {
+        ?e ner:resolvedToConcept ?c .
+
+        ?c ner:conceptInOntologyVersion/
+           ner:versionOfOntology/
+           ner:ontologyAcronym ?acronym .
+
+        FILTER(UCASE(STR(?acronym)) != "BRAINKB")
+      }
+    }
+  }
 }
+ORDER BY ?cls ?key ?e ?gap
 LIMIT {{limit}}
 """,
     params=(
-        QAParam("name", "string", "Text to look for in entity labels, e.g. 'hippocampus'."),
-        QAParam("limit", "int", "Maximum number of rows to return.",
-                default=100, minimum=1, maximum=1000),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of result rows to return.",
+            default=1000,
+            minimum=1,
+        ),
     ),
 ))
+
+################################################################################
+# End CQ9
+################################################################################
+
+# EXAMPLE — a query that needs input from the user. `name` has no default, so
+# brainkb_qa_run refuses to run without it ("missing required parameter: name").
+# register(QAQuery(
+#     id="ne_find_entity_by_label",
+#     category=CATEGORY,
+#     question="Which entities have a label matching a given name, and what are their IRIs and types?",
+#     notes=(
+#         "REQUIRES INPUT: `name`, the text the user typed (e.g. 'hippocampus'). "
+#         "Ask the user for it if they have not given one — do not guess. Matching "
+#         "is case-insensitive substring on rdfs:label. Use this to turn a name into "
+#         "an IRI before calling IRI-based queries such as ne_entities_of_type. "
+#         "Returns ?entity, ?label and ?type (may be empty); several rows per entity "
+#         "if it has several types."
+#     ),
+#     example={"name": "pyramidal", "limit": 20},
+#     sparql="""
+# PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+# PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+#
+# SELECT DISTINCT ?entity ?label ?type WHERE {
+#   ?entity rdfs:label ?label .
+#   FILTER(CONTAINS(LCASE(STR(?label)), LCASE({{name}})))
+#   OPTIONAL { ?entity rdf:type ?type }
+# }
+# LIMIT {{limit}}
+# """,
+#     params=(
+#         QAParam("name", "string", "Text to look for in entity labels, e.g. 'hippocampus'."),
+#         QAParam("limit", "int", "Maximum number of rows to return.",
+#                 default=100, minimum=1, maximum=1000),
+#     ),
+# ))
