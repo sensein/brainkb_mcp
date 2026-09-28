@@ -502,6 +502,138 @@ ORDER BY DESC(?shared) ?p1 ?p2
 # End CQ6
 ################################################################################
 
+################################################################################
+# Non user parameter query
+# CQ7 — Which external mappings are associated with multiple sources?
+################################################################################
+
+register(QAQuery(
+    id="ne_external_mappings_across_sources",
+    category=CATEGORY,
+    question="Which external ontology terms are mapped to entities occurring across multiple sources?",
+    notes=(
+        "Use for requests such as "
+        "'Which ontology terms are represented across multiple papers?'; "
+        "'Which external mappings are most widely represented?'; "
+        "'What mapped concepts do the sources have in common?'. "
+        "Requires no user parameters and returns all qualifying rows "
+        "without a query-level row limit. "
+        "Returns ?obo (external mapping target IRI) and "
+        "?papers (number of distinct sources mentioning entities mapped "
+        "to that target). Despite its name, ?obo is not restricted to "
+        "the OBO namespace. "
+        "Includes exactMatch, closeMatch, and broadMatch mappings. "
+        "Excludes provisional concept IRIs beginning with "
+        "https://brainkb.org/concept/. "
+        "Only targets associated with more than one source are returned. "
+        "Each source is counted once per target, even when several entities "
+        "in that source map to the same target. Different entities may "
+        "contribute to the same target's source count; this does not require "
+        "one canonical entity to occur in every counted source. "
+        "Mapping tiers are combined in this query and do not all establish "
+        "identity. Use ne_entity_external_mappings to inspect individual tiers. "
+        "Mappings belong to entity nodes; source provenance indicates where "
+        "those entities occur. It does not establish that each source "
+        "independently asserted or endorsed the mapping. "
+        "Sources may include documents other than papers. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "An empty result means no qualifying mapping target is associated "
+        "with entities from at least two sources."
+    ),
+    example={},
+    sparql="""
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?obo (COUNT(DISTINCT ?pub) AS ?papers)
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e (skos:exactMatch|skos:closeMatch|skos:broadMatch) ?obo ;
+       prov:hadPrimarySource ?pub .
+
+    FILTER(!STRSTARTS(STR(?obo), "https://brainkb.org/concept/"))
+  }
+}
+GROUP BY ?obo
+HAVING(COUNT(DISTINCT ?pub) > 1)
+ORDER BY DESC(?papers) ?obo
+""",
+    params=(),
+))
+
+################################################################################
+# End CQ7
+################################################################################
+
+
+################################################################################
+# Non user parameter query
+# CQ8 — What is an entity mapped to, at which mapping relationship?
+################################################################################
+
+register(QAQuery(
+    id="ne_entity_external_mappings",
+    category=CATEGORY,
+    question="Which external ontology terms are entities mapped to, and at which mapping tier?",
+    notes=(
+        "Use for requests such as "
+        "'Show entity-to-ontology mappings'; "
+        "'Which ontology terms are linked to the extracted entities?'; "
+        "'Show exact, close, broad, narrow, and related matches'; "
+        "'What mapping relationship connects each entity to its ontology term?'. "
+        "Requires no user parameters and returns all qualifying rows "
+        "without a query-level row limit. "
+        "Returns ?e (canonical entity IRI), ?key (normalized entity key), "
+        "?tier (exact, close, broad, narrow, or related), and "
+        "?obo (external mapping target IRI). Despite its name, ?obo is "
+        "not restricted to the OBO namespace. "
+        "Excludes provisional concept IRIs beginning with "
+        "https://brainkb.org/concept/. "
+        "The tier identifies the recorded SKOS mapping relationship, "
+        "not a numeric confidence score. Broad and narrow describe mapping "
+        "direction; related indicates an associative mapping. Do not treat "
+        "all tiers as identity or interchangeability. "
+        "An entity can have multiple targets or mapping tiers, producing "
+        "multiple rows without implying duplicate entities. "
+        "Mappings are read from shared entity nodes and are not attributed "
+        "to individual sources or mapping decisions by this query. "
+        "The query covers all qualifying entities in "
+        "https://www.brainkb.org/named-entity/. Requests about a specific "
+        "entity, tier, or ontology require additional filters. "
+        "An empty result means no records match the required normalized-key "
+        "and external-mapping patterns."
+    ),
+    example={},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+
+SELECT DISTINCT ?e ?key ?tier ?obo
+WHERE {
+  VALUES (?p ?tier) {
+    (skos:exactMatch   "exact")
+    (skos:closeMatch   "close")
+    (skos:narrowMatch  "narrow")
+    (skos:broadMatch   "broad")
+    (skos:relatedMatch "related")
+  }
+
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e ner:normalizedEntityKey ?key ;
+       ?p ?obo .
+
+    FILTER(!STRSTARTS(STR(?obo), "https://brainkb.org/concept/"))
+  }
+}
+ORDER BY ?key ?e ?tier ?obo
+""",
+    params=(),
+))
+
+################################################################################
+# End CQ8
+################################################################################
+
 # EXAMPLE — a query that needs input from the user. `name` has no default, so
 # brainkb_qa_run refuses to run without it ("missing required parameter: name").
 register(QAQuery(
