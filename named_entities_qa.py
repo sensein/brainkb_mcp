@@ -815,6 +815,103 @@ LIMIT {{limit}}
 ))
 
 ################################################################################
+# Optional user parameter query
+# CQ11 — Causal claims involving an entity as cause, effect, or mediator
+################################################################################
+
+register(QAQuery(
+    id="ne_entity_causal_claims",
+    category=CATEGORY,
+    question="Which causal claims involve an entity, in which roles, and with what negation or hypotheticality flags?",
+    notes=(
+        "OPTIONAL INPUT: `entity_key`, an exact normalized entity key. "
+        "Omit it or supply an empty string to return all qualifying "
+        "entity-role participations. Limit defaults to 1000 result rows. "
+        "Relevant requests include: "
+        "'Which causal claims involve this entity?'; "
+        "'Is this entity a cause, effect, or mediator?'; "
+        "'What effects are attributed to this entity?'; "
+        "'What causes this entity or process?'; "
+        "'Which claims involving this entity are negated or hypothetical?'. "
+        "If the user supplies an entity name or IRI, retrieve its normalized "
+        "key first; do not guess the key. If a specific entity has not been "
+        "resolved, do not silently substitute an all-entity query. "
+        "Returns ?key (participating entity key), ?role (cause, effect, "
+        "or mediator), ?causeKey, ?effectKey, ?negated, and ?hypothetical. "
+        "Reads flags from each claim's current causal-relation version. "
+        "Only claims with both flags and normalized cause/effect keys "
+        "are returned. Claims lacking these fields are omitted. "
+        "A true negation flag records a negated claim; a true hypotheticality "
+        "flag records a hypothetical claim. A false hypotheticality flag "
+        "does not independently establish experimental intervention or truth. "
+        "An entity occupying multiple roles produces multiple rows. "
+        "With no entity filter, a claim may appear for each participating "
+        "entity and role. Separate claims may produce identical displayed "
+        "rows because claim IRIs and source provenance are not selected. "
+        "Matching a normalized key does not disambiguate separate entity "
+        "IRIs sharing that key. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "Requests restricted to one role or flag require additional filters. "
+        "An empty result means no claims match the filter and required "
+        "patterns; it does not establish that no causal relationship exists."
+    ),
+    example={"entity_key": "dendritic_calcium_signaling", "limit": 1000},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT ?key ?role ?causeKey ?effectKey ?negated ?hypothetical
+WHERE {
+  VALUES ?requestedKey { {{entity_key}} }
+
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?x ner:normalizedEntityKey ?key .
+
+    ?rel ner:hasCause ?c ;
+         ner:hasEffect ?ef ;
+         ner:hasCurrentCausalRelationVersion ?v .
+
+    ?v ner:causalNegated ?negated ;
+       ner:causalHypothetical ?hypothetical .
+
+    ?c ner:normalizedEntityKey ?causeKey .
+    ?ef ner:normalizedEntityKey ?effectKey .
+
+    {
+      { ?rel ner:hasCause ?x . BIND("cause" AS ?role) }
+      UNION
+      { ?rel ner:hasEffect ?x . BIND("effect" AS ?role) }
+      UNION
+      { ?rel ner:hasMediator ?x . BIND("mediator" AS ?role) }
+    }
+  }
+
+  FILTER(?requestedKey = "" || ?key = ?requestedKey)
+}
+ORDER BY ?key ?role ?causeKey ?effectKey ?negated ?hypothetical ?rel
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "entity_key",
+            "string",
+            "Optional exact normalized entity key; omit or use an empty string for all entities.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of entity-role claim rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ11
+################################################################################
+
+################################################################################
 # End CQ10
 ################################################################################
 
