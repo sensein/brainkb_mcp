@@ -912,11 +912,86 @@ LIMIT {{limit}}
 ################################################################################
 
 ################################################################################
-# End CQ10
+# Optional user parameter query
+# CQ12 — Reconstruct recorded multi-step causal chains
 ################################################################################
 
+register(QAQuery(
+    id="ne_ordered_causal_chains",
+    category=CATEGORY,
+    question="Which multi-step causal chains are recorded, and how are their claims ordered?",
+    notes=(
+        "Use for requests such as "
+        "'Show multi-step mechanisms'; "
+        "'Reconstruct the recorded causal chains'; "
+        "'What are the steps in each mechanism?'; "
+        "'Show the order of claims within a causal chain'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "Returns ?chain (chain IRI), ?chainLabel (optional chain label), "
+        "?rel (causal-relation IRI), ?position (distinct predecessor count), "
+        "?causeKey, and ?effectKey. "
+        "Uses explicit CausalChain membership and nextCausalRelation links; "
+        "it does not infer chains from co-occurrence or shared entities. "
+        "For a linear, acyclic chain, predecessor counts give zero-based "
+        "positions: 0, 1, 2, and so on. Branching chains can have tied "
+        "positions; cycles make this count unsuitable as a step index. "
+        "Only predecessors belonging to the same chain are counted, but "
+        "the transitive path can traverse relations outside that chain. "
+        "The query does not verify that one step's effect is the next "
+        "step's cause. Ordered claim records may describe related parts "
+        "of a mechanism without forming a continuous entity-to-entity path. "
+        "Claims missing normalized cause or effect keys are omitted. "
+        "Negation, hypotheticality, and source evidence are not selected; "
+        "do not interpret every returned step as an established causal fact. "
+        "The limit applies to step rows, not complete chains, and can "
+        "truncate a chain. The query covers all recorded chains in "
+        "https://www.brainkb.org/named-entity/. "
+        "A specific chain requires an additional chain-IRI filter. "
+        "An empty result means no records match the required chain "
+        "membership and cause/effect patterns."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT ?chain ?chainLabel ?rel
+       (COUNT(DISTINCT ?prior) AS ?position)
+       ?causeKey ?effectKey
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?chain a ner:CausalChain ;
+           ner:hasChainRelation ?rel .
+
+    ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
+         ner:hasEffect/ner:normalizedEntityKey ?effectKey .
+
+    OPTIONAL { ?chain rdfs:label ?chainLabel }
+
+    OPTIONAL {
+      ?chain ner:hasChainRelation ?prior .
+      ?prior ner:nextCausalRelation+ ?rel .
+      FILTER(?prior != ?rel)
+    }
+  }
+}
+GROUP BY ?chain ?chainLabel ?rel ?causeKey ?effectKey
+ORDER BY ?chain ?position ?rel ?causeKey ?effectKey
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of chain-step rows to return; may truncate a chain.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
 ################################################################################
-# End CQ9
+# End CQ12
 ################################################################################
 
 # EXAMPLE — a query that needs input from the user. `name` has no default, so
