@@ -1234,3 +1234,73 @@ LIMIT {{limit}}
 ################################################################################
 # End CQ15
 ################################################################################
+
+################################################################################
+# Optional user parameter query — result limit only
+# CQ16 — Validity intervals for causal-claim versions
+################################################################################
+
+register(QAQuery(
+    id="ne_causal_claim_validity_intervals",
+    category=CATEGORY,
+    question="For how long was each version of a claim considered current, according to its recorded validity interval?",
+    notes=(
+        "Use for requests such as "
+        "'Show claim-version validity intervals'; "
+        "'When was each claim version considered current?'; "
+        "'List claim revisions with their start and end dates'; "
+        "'Show the recorded validity history of causal claims'. "
+        "No input is required; limit defaults to 1000 result rows. "
+        "Returns ?rel (causal-relation IRI), ?rev (revision number), "
+        "?from (optional valid-from value), and "
+        "?until (optional valid-until value). "
+        "Includes recorded versions with a parent claim and revision number, "
+        "including historical versions. Versions without either interval "
+        "endpoint remain visible with the corresponding field unbound. "
+        "A missing valid-until value does not by itself establish that "
+        "a version is current; the endpoint may simply be absent. "
+        "Use hasCurrentCausalRelationVersion to identify an explicitly "
+        "designated current version. "
+        "These are recorded version-validity intervals, not publication "
+        "dates or proof that a scientific claim was true during that period. "
+        "The query returns interval endpoints; it does not calculate duration. "
+        "Results are ordered by claim IRI and revision number. "
+        "The limit applies to result rows and may truncate a claim's history. "
+        "The query covers all qualifying versions in "
+        "https://www.brainkb.org/named-entity/. "
+        "A specific claim requires an additional claim-IRI filter. "
+        "An empty result means no version records match the required "
+        "type, parent-claim, and revision-number patterns."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT ?rel ?rev ?from ?until
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?v a ner:CausalRelationVersion ;
+       ner:versionOfCausalRelation ?rel ;
+       ner:relationRevisionNumber ?rev .
+
+    OPTIONAL { ?v ner:validFrom ?from }
+    OPTIONAL { ?v ner:validUntil ?until }
+  }
+}
+ORDER BY ?rel ?rev
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of claim-version interval rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ16
+################################################################################
