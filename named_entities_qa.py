@@ -1,0 +1,536 @@
+# -*- coding: utf-8 -*-
+# -----------------------------------------------------------------------------
+# DISCLAIMER: This software is provided "as is" without any warranty,
+# express or implied, including but not limited to the warranties of
+# merchantability, fitness for a particular purpose, and non-infringement.
+#
+# In no event shall the authors or copyright holders be liable for any
+# claim, damages, or other liability, whether in an action of contract,
+# tort, or otherwise, arising from, out of, or in connection with the
+# software or the use or other dealings in the software.
+# -----------------------------------------------------------------------------
+ 
+# @Author  : Tek Raj Chhetri
+# @Email   : tekraj@mit.edu
+# @Web     : https://tekrajchhetri.com/
+# @File    : named_entities_qa.py
+# @Software: PyCharm
+
+"""Canned SPARQL queries about named entities.
+
+Each QAQuery below is served by brainkb_qa_list / brainkb_qa_run in server.py.
+To add one, copy a whole register(...) block, give it a new id — see guide.md.
+"""
+
+from qa_registry import QAParam, QAQuery, register, register_category
+
+# The description is shown to the MCP agent in the brainkb_qa_list menu; it is
+# the only thing the agent reads before deciding to open this category. Name the
+# kinds of questions answered, and keep it current as queries are added.
+
+CATEGORY = register_category(
+    "named_entities",
+    "Explore named entities, their mentions, relationships, ontology mappings, "
+    "and supporting evidence across papers and other source documents. "
+    "Find entities by type or source; inspect naming variations and exact "
+    "mention locations; identify entities shared across sources; compare "
+    "documents by shared entities; and count entities and mentions. "
+    "Explore connected entities, anatomical containment, cell locations, "
+    "marker expression, phenotypes, organisms, method participants, "
+    "hierarchies, and data or software dependencies. "
+    "Inspect ontology mappings, including BKE taxonomy links, mapping tiers, "
+    "coverage gaps, candidate decisions, and mapping provenance. "
+    "Retrieve recorded causal entity claims, chains, mediators, moderators, "
+    "confounders, negation, hypotheticality, evidence bases, effect sizes, "
+    "and potentially conflicting entity claims across sources. "
+    "Examine publication-year trends, claim-version intervals, extraction "
+    "runs, agents, configurations, confidence scores, reviewer decisions, "
+    "changes, and validation summaries. "
+    "Use for questions such as 'Which papers mention this entity?', "
+    "'What names are used for it?', 'What is it connected to?', "
+    "'Which entities map to BKE?', 'Which cells express this marker?', "
+    "'What evidence supports this claim?', or 'How was this extraction reviewed?'. "
+    "Choose the individual QA whose predicates and supported filters match "
+    "the request. Distinguish entity identity from mentions and ontology "
+    "mappings, and entity provenance from evidence for a specific relationship. "
+    "Shared identity does not establish agreement between entity claims. "
+    "Detailed audit queries require records that compact exports may omit; "
+    "empty answers can reflect missing records or unmatched filters."
+)
+
+################################################################################
+# Every query below is self-contained: its own PREFIXes, its own params, no
+# shared constants. Copy a whole register(...) block to start a new one.
+#
+# `question`, `notes` and `example` are what the MCP agent sees in
+# brainkb_qa_list — it chooses a query and fills its params from those alone,
+# so say there (not in a code comment) anything the agent needs to know.
+
+#******************************************************************************
+# Competency Questions
+
+################################################################################
+
+
+################################################################################
+# User parameter query — type IRI resolved through ne_available_entity_types
+# CQ1 — Which entities of a given type exist, and in which papers?
+################################################################################
+
+register(QAQuery(
+    id="ne_entities_of_type",
+    category=CATEGORY,
+    question="Which entities of a requested type exist, and which sources mention them?",
+    notes=(
+        "Use for requests such as 'List the drugs', 'Show brain regions', "
+        "'Which genes occur in the documents?', or "
+        "'Which papers mention cell types?'. "
+        "First run ne_available_entity_types to resolve the user's type name "
+        "to an available class IRI, then supply it as entity_type. "
+        "Type discovery must use the same named graph. "
+        "For example, 'drug' resolves to https://brainkb.org/ner/Drug "
+        "when that type is returned. "
+        "The runner must bind entity_type as an IRI before execution; "
+        "do not execute this query with the parameter unbound. "
+        "Returns ?e (entity IRI), ?pub (source document IRI), "
+        "?label (normalized entity label), and ?doi (optional source DOI). "
+        "Returns all matching rows without a query-level row limit. "
+        "An entity appearing in several sources has multiple source rows; "
+        "these are not duplicate entities. Sources without DOIs remain visible. "
+        "Matches the selected rdf:type without explicit subclass expansion. "
+        "Source provenance indicates occurrence, not support for a specific claim. "
+        "The query is scoped to the named graph "
+        "https://www.brainkb.org/named-entity/. Selected papers require an "
+        "additional source filter. An empty result means no entities match "
+        "the required type, label, and source-provenance patterns."
+    ),
+    example={"entity_type": "https://brainkb.org/ner/Drug"},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT DISTINCT ?e ?pub ?label ?doi
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e a ner:NamedEntity ;
+       a ?entity_type ;
+       ner:normalizedEntityLabel ?label ;
+       prov:hadPrimarySource ?pub .
+
+    OPTIONAL { ?pub ner:doi ?doi }
+  }
+}
+ORDER BY ?label ?e ?pub
+""",
+    params=(
+        QAParam(
+            "entity_type",
+            "iri",
+            "Required class IRI selected from ne_available_entity_types.",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ1
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ2 — Under which verbatim surface forms is an entity mentioned?
+################################################################################
+
+register(QAQuery(
+    id="ne_entity_surface_forms",
+    category=CATEGORY,
+    question="How is an entity named or written across papers and other sources?",
+    notes=(
+        "Use to inspect verbatim terminology variations for extracted entities. "
+        "Relevant requests include: "
+        "'What names are used for this entity?'; "
+        "'How is this entity mentioned across papers?'; "
+        "'Show spelling or naming variations'; "
+        "'Which sources use each name?'; "
+        "'Show the original wording for this entity'. "
+        "Optionally supply requestedKey as an exact normalized entity key. "
+        "If the user supplies a name or IRI, first look up the entity and "
+        "retrieve its normalized key; do not invent a key from the name. "
+        "If omitted, returns surface forms for all entities with matching "
+        "mention records. Returns all qualifying rows without a query-level limit. "
+        "Returns ?pub (source document IRI), ?key (normalized entity key), "
+        "?surface (verbatim mention text), and ?doi (optional source DOI). "
+        "Repeated occurrences of the same surface form for the same key and "
+        "source are deduplicated; this query does not count occurrences or "
+        "return mention offsets. Sources without DOIs remain visible. "
+        "Source attribution follows each mention's document version. "
+        "Surface forms reflect extracted wording, not independently verified "
+        "synonyms. Matching a normalized key does not disambiguate separate "
+        "entity IRIs that share that key; use an entity-IRI filter when needed. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "An empty result means no mention records match the supplied key "
+        "and required source-document links."
+    ),
+    example={"requestedKey": "hippocampus"},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT DISTINCT ?pub ?key ?surface ?doi
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e ner:normalizedEntityKey ?key ;
+       ner:hasMention ?m .
+
+    ?m ner:surfaceForm ?surface ;
+       ner:partOfDocumentVersion/ner:versionOfDocument ?pub .
+
+    OPTIONAL { ?pub ner:doi ?doi }
+  }
+
+  FILTER(!BOUND(?requestedKey) || ?key = ?requestedKey)
+}
+ORDER BY ?key ?surface ?pub
+""",
+    params=(
+        QAParam(
+            "requestedKey",
+            "string",
+            "Optional exact normalized entity key; omit to return all keys.",
+            default=None,
+        ),
+    ),
+))
+
+################################################################################
+# End CQ2
+################################################################################
+
+################################################################################
+# Non user parameter query
+# CQ3 — Exactly where in the source document does each mention sit?
+################################################################################
+
+register(QAQuery(
+    id="ne_mention_source_offsets",
+    category=CATEGORY,
+    question="Where does each entity mention occur in its source document?",
+    notes=(
+        "Use to inspect the character-level grounding of extracted mentions. "
+        "Relevant requests include: "
+        "'Where exactly are the entities mentioned?'; "
+        "'Show the character offsets of each mention'; "
+        "'Show the original text and its position in the document'; "
+        "'Which source contains this mention?'; "
+        "'Retrieve mention spans for grounding checks'. "
+        "Requires no user parameters and returns all qualifying rows "
+        "without a query-level row limit. "
+        "Returns ?m (mention IRI), ?pub (source document IRI), "
+        "?surface (verbatim mention text), ?start (document start offset), "
+        "?end (document end offset), and ?doi (optional source DOI). "
+        "Offsets refer to the text representation of the linked document "
+        "version, not PDF page coordinates or positions in a differently "
+        "formatted copy. Reproducing a span requires that exact text version "
+        "and the exporter's offset convention. "
+        "Only mentions with both offsets, a surface form, and a source-document "
+        "link are returned. Sources without DOIs remain visible. "
+        "Separate occurrences remain separate mention IRIs even when their "
+        "surface forms are identical. "
+        "The query retrieves stored grounding information; it does not "
+        "independently verify that the offsets match the source text. "
+        "The query covers all sources in the named graph "
+        "https://www.brainkb.org/named-entity/. Requests about a specific "
+        "entity, mention, or document require additional filters. "
+        "An empty result means no mentions match all required grounding "
+        "patterns, not necessarily that no entities were extracted."
+    ),
+    example={},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT DISTINCT ?m ?pub ?surface ?start ?end ?doi
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?m a ner:EntityMention ;
+       ner:surfaceForm ?surface ;
+       ner:documentStartOffset ?start ;
+       ner:documentEndOffset ?end ;
+       ner:partOfDocumentVersion/ner:versionOfDocument ?pub .
+
+    OPTIONAL { ?pub ner:doi ?doi }
+  }
+}
+ORDER BY ?pub ?start ?end ?m
+""",
+    params=(),
+))
+
+################################################################################
+# End CQ3
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ4 — Full typed inventory contributed by one paper or all sources
+################################################################################
+
+register(QAQuery(
+    id="ne_source_typed_inventory",
+    category=CATEGORY,
+    question="Which entities and entity types occur in a paper or across all sources?",
+    notes=(
+        "OPTIONAL INPUT: `doi`, the paper's DOI as stored in the graph. "
+        "Omit it or supply an empty string to return inventories for all "
+        "sources, including sources without DOIs. Do not ask for a DOI "
+        "when the user requests an inventory across all sources. "
+        "If the user requests a specific paper, use its supplied or "
+        "looked-up DOI; do not silently return all sources when that "
+        "paper has not been identified. "
+        "Relevant requests include: "
+        "'List all entities in this paper'; "
+        "'What entities were extracted from this study?'; "
+        "'Show the typed entity inventory across documents'. "
+        "A supplied DOI is matched exactly; a DOI URL may differ from "
+        "the bare DOI stored in the graph. "
+        "Returns ?pub (source document IRI), ?doi (optional DOI), "
+        "?e (canonical entity IRI), ?key (normalized entity key), and "
+        "?cls (entity class IRI in the ner namespace). "
+        "Excludes the generic ner:NamedEntity class. "
+        "Entities with multiple types produce multiple rows; these are "
+        "type assignments, not duplicate entities. "
+        "Types belong to shared entity nodes and may aggregate assignments "
+        "across sources; they are not necessarily source-specific typings. "
+        "Returns all qualifying rows without a query-level row limit. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "Selecting a particular source without a DOI requires an additional "
+        "source-IRI filter. An empty result means no records match the "
+        "filter and required entity-key, type, and source-provenance patterns."
+    ),
+    example={},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT DISTINCT ?pub ?doi ?e ?key ?cls
+WHERE {
+  VALUES ?requestedDoi { {{doi}} }
+
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e prov:hadPrimarySource ?pub ;
+       ner:normalizedEntityKey ?key ;
+       a ?cls .
+
+    OPTIONAL { ?pub ner:doi ?doi }
+
+    FILTER(
+      STRSTARTS(STR(?cls), STR(ner:)) &&
+      ?cls != ner:NamedEntity
+    )
+  }
+
+  FILTER(
+    ?requestedDoi = "" ||
+    (BOUND(?doi) && STR(?doi) = STR(?requestedDoi))
+  )
+}
+ORDER BY ?cls ?key ?e ?pub
+""",
+    params=(
+        QAParam(
+            "doi",
+            "string",
+            "Optional exact paper DOI; omit or use an empty string for all sources.",
+            default="",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ4
+################################################################################
+
+################################################################################
+# Non user parameter query
+# CQ5 — Which entities are shared across papers?
+
+register(QAQuery(
+    id="ne_entities_shared_across_sources",
+    category=CATEGORY,
+    question="Which entities are shared across papers or sources?",
+    notes=(
+        "Use to find canonical entities occurring in multiple sources and "
+        "inspect how those sources name them. Relevant requests include: "
+        "'Which entities appear in multiple papers?'; "
+        "'What entities do the papers have in common?'; "
+        "'Which entities recur across studies?'; "
+        "'Which entities are mentioned most widely?'; "
+        "'Are different names used for the same entity across papers?'; "
+        "'Show terminology variations across documents'; "
+        "'Is the same entity IRI reused across sources?'. "
+        "Returns all qualifying results without a query-level row limit. "
+        "Groups by canonical entity IRI and normalized key. "
+        "Returns ?entity (canonical IRI), ?key (normalized key), "
+        "?papers (distinct source-document count), "
+        "?mentions (distinct mention-node count), "
+        "?wording (distinct surface forms separated by ' | '), and "
+        "?sources (DOIs where available, otherwise source IRIs). "
+        "Each mention is attributed through its document version, preventing "
+        "mentions from being incorrectly counted against every source of a "
+        "shared entity. The papers column includes non-paper documents. "
+        "Concatenated values are unordered. "
+        "Shared identity reflects existing graph assignments; it does not "
+        "prove correct entity resolution, consistent meaning, or agreement "
+        "between scientific entity claims. Separate IRIs representing the same "
+        "real-world entity are not merged. "
+        "The query is scoped to the named graph "
+        "https://www.brainkb.org/named-entity/. A specific entity or selected "
+        "set of papers requires additional filters. "
+        "An empty result means no entity has qualifying mention records in "
+        "at least two sources."
+    ),
+    example={},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT ?entity ?key
+       (COUNT(DISTINCT ?source) AS ?papers)
+       (COUNT(DISTINCT ?mention) AS ?mentions)
+       (GROUP_CONCAT(DISTINCT ?surface; separator=" | ") AS ?wording)
+       (GROUP_CONCAT(DISTINCT ?sourceId; separator=" | ") AS ?sources)
+WHERE {
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?entity a ner:NamedEntity ;
+            ner:normalizedEntityKey ?key ;
+            ner:hasMention ?mention .
+
+    ?mention ner:surfaceForm ?surface ;
+             ner:partOfDocumentVersion/ner:versionOfDocument ?source .
+
+    OPTIONAL { ?source ner:doi ?doi }
+    BIND(COALESCE(STR(?doi), STR(?source)) AS ?sourceId)
+  }
+}
+GROUP BY ?entity ?key
+HAVING(COUNT(DISTINCT ?source) > 1)
+ORDER BY DESC(?papers) ?key ?entity
+""",
+            params=(),
+))
+
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ6 — Which papers are most related by shared entities?
+################################################################################
+
+register(QAQuery(
+    id="ne_sources_by_shared_entities",
+    category=CATEGORY,
+    question="Which papers or sources share the most entities with a given paper?",
+    notes=(
+        "OPTIONAL INPUT: `doi`, the reference paper's DOI as stored in the graph. "
+        "Omit it or supply an empty string to compare all source pairs, "
+        "including sources without DOIs. "
+        "Relevant requests include: "
+        "'Which papers share entities with this paper?'; "
+        "'Find related studies based on common entities'; "
+        "'Which documents have the most entities in common?'; "
+        "'Rank papers by shared entities'. "
+        "Do not ask for a DOI when the user requests comparisons across "
+        "all sources. If the user requests comparison with a specific paper, "
+        "use its supplied or looked-up DOI; do not silently compare all "
+        "sources when the reference paper has not been identified. "
+        "A supplied DOI is matched exactly. "
+        "Returns ?p1 (reference source IRI), ?p2 (other source IRI), "
+        "?doi (optional reference DOI), ?otherDoi (optional other DOI), "
+        "and ?shared (number of distinct entity IRIs shared by the pair). "
+        "Excludes self-comparisons and returns only pairs sharing at least "
+        "one entity, ordered by shared-entity count descending. "
+        "When no DOI is supplied, both directions of each pair are returned: "
+        "A to B and B to A. "
+        "Shared entities are identified by the same entity IRI, not matching "
+        "names or external ontology terms. "
+        "The score is a raw overlap count, not a normalized similarity score; "
+        "sources with larger extracted inventories may rank higher. "
+        "Entity overlap does not establish scientific agreement or citation "
+        "relationships. Sources may include documents other than papers. "
+        "Selecting a reference source without a DOI requires an additional "
+        "source-IRI filter. "
+        "Returns all qualifying rows without a query-level row limit. "
+        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "An empty result means no source pairs match the filter and share "
+        "an entity through the recorded source-provenance links."
+    ),
+    example={},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?p1 ?p2 ?doi ?otherDoi
+       (COUNT(DISTINCT ?e) AS ?shared)
+WHERE {
+  VALUES ?requestedDoi { {{doi}} }
+
+  GRAPH <https://www.brainkb.org/named-entity/> {
+    ?e a ner:NamedEntity ;
+       prov:hadPrimarySource ?p1, ?p2 .
+
+    OPTIONAL { ?p1 ner:doi ?doi }
+    OPTIONAL { ?p2 ner:doi ?otherDoi }
+
+    FILTER(?p1 != ?p2)
+  }
+
+  FILTER(
+    ?requestedDoi = "" ||
+    (BOUND(?doi) && STR(?doi) = STR(?requestedDoi))
+  )
+}
+GROUP BY ?p1 ?p2 ?doi ?otherDoi
+ORDER BY DESC(?shared) ?p1 ?p2
+""",
+    params=(
+        QAParam(
+            "doi",
+            "string",
+            "Optional exact reference-paper DOI; omit or use an empty string to compare all source pairs.",
+            default="",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ6
+################################################################################
+
+# EXAMPLE — a query that needs input from the user. `name` has no default, so
+# brainkb_qa_run refuses to run without it ("missing required parameter: name").
+register(QAQuery(
+    id="ne_find_entity_by_label",
+    category=CATEGORY,
+    question="Which entities have a label matching a given name, and what are their IRIs and types?",
+    notes=(
+        "REQUIRES INPUT: `name`, the text the user typed (e.g. 'hippocampus'). "
+        "Ask the user for it if they have not given one — do not guess. Matching "
+        "is case-insensitive substring on rdfs:label. Use this to turn a name into "
+        "an IRI before calling IRI-based queries such as ne_entities_of_type. "
+        "Returns ?entity, ?label and ?type (may be empty); several rows per entity "
+        "if it has several types."
+    ),
+    example={"name": "pyramidal", "limit": 20},
+    sparql="""
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT DISTINCT ?entity ?label ?type WHERE {
+  ?entity rdfs:label ?label .
+  FILTER(CONTAINS(LCASE(STR(?label)), LCASE({{name}})))
+  OPTIONAL { ?entity rdf:type ?type }
+}
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam("name", "string", "Text to look for in entity labels, e.g. 'hippocampus'."),
+        QAParam("limit", "int", "Maximum number of rows to return.",
+                default=100, minimum=1, maximum=1000),
+    ),
+))
