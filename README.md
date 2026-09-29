@@ -144,6 +144,7 @@ backend. Three inputs are therefore treated as hostile:
 | `MCP_UPLOAD_TOTAL_BYTES` | `20000000000` | across all staged uploads |
 | `MCP_UPLOAD_TTL_MIN` | `360` | stale uploads are swept |
 | `MCP_ALLOW_SHARED_IDENTITY` | `false` | Opt in to `BRAINKB_TOKEN` as an ambient identity (single-user HTTP only) |
+| `MCP_PUBLIC_HOST` | *(empty → from the request, see [Landing page address](#landing-page-address-main-vs-sandbox))* | Public hostname the landing page puts in its sample commands |
 
 **Backend URL allowlist.** The base URL is the *destination of requests that carry
 credentials* — the caller's bearer token, the env PAT, a session's stored
@@ -373,15 +374,46 @@ docker push <acct>.dkr.ecr.<region>.amazonaws.com/brainkb-mcp:latest
    endpoint to hammer the backend. (TCP on 8080 also works; `GET /mcp` with a
    `400-499` matcher works too, since a bare GET returns 406.)
 
-Two public, unauthenticated routes exist for humans and load balancers:
+Three public, unauthenticated routes exist for humans and load balancers:
 
 | Route | Response |
 |-------|----------|
-| `GET /` | Landing page: what the host is, the `claude mcp add` command, and why `/mcp` returns 406 in a browser |
+| `GET /` | Landing page: what the server does, the `claude mcp add` command, the `/upload` example, a link to the BrainKB skill, and why `/mcp` returns 406 in a browser. Its status dot polls `/healthz` |
+| `GET /logo.png` | The BrainKB logo used by the landing page (also its favicon) |
 | `GET /healthz` | `200` `ok` — liveness for the target group |
 
-Neither discloses configuration (no backend URLs, versions, or request echo beyond
-a validated, HTML-escaped `Host`), because both are reachable without credentials.
+None of them discloses configuration (no backend URLs, versions, or request echo),
+because all are reachable without credentials. The landing page names a host only
+from a fixed list, as described next.
+
+#### Landing page address (main vs sandbox)
+
+The landing page's sample commands (`claude mcp add … https://<host>/mcp` and the
+`/upload` snippet) name the deployment they are served from. No per-deployment
+edit is needed:
+
+1. A visitor opens `https://mcp.sandbox.brainkb.org/`; the browser sends
+   `Host: mcp.sandbox.brainkb.org`, and the proxy forwards it to the container.
+2. The server matches that host against a fixed list: `mcp.brainkb.org` (main)
+   and `mcp.sandbox.brainkb.org` (sandbox). A match is shown as is.
+3. Anything else (localhost, a bare IP, a proxy's internal name, a forged
+   `Host`) falls back to `mcp.brainkb.org`, so the page never tells people to
+   register an address they cannot reach. A local run therefore shows the
+   production address.
+
+This relies on the proxy passing the original `Host` through (nginx:
+`proxy_set_header Host $host;`; an ALB does by default). If yours rewrites it, set
+the address explicitly with `MCP_PUBLIC_HOST`, which always wins:
+
+| Deployment | `MCP_PUBLIC_HOST` |
+|------------|-------------------|
+| Main | `mcp.brainkb.org` (or leave empty) |
+| Sandbox | `mcp.sandbox.brainkb.org` |
+
+The web UI's `https://sandbox.brainkb.org/mcp` is a page of the BrainKB UI, not
+this server; the sandbox MCP endpoint is `https://mcp.sandbox.brainkb.org/mcp`.
+To add another public deployment, add its hostname to `_PUBLIC_HOSTS` in
+`server.py` or set `MCP_PUBLIC_HOST` on it.
 
 Notes for the ALB:
 - **Auth pass-through**: the ALB forwards the `Authorization` header by default —
@@ -426,6 +458,10 @@ MCP_BIND_ADDR=0.0.0.0
 # No ambient identity: BRAINKB_TOKEN is ignored here, and must stay unset in the
 # image/compose env. Callers authenticate per request.
 # MCP_ALLOW_SHARED_IDENTITY=false
+
+# Address the landing page shows. Empty works when the proxy forwards Host; set it
+# to pin the deployment: mcp.brainkb.org (main) or mcp.sandbox.brainkb.org (sandbox).
+# MCP_PUBLIC_HOST=mcp.sandbox.brainkb.org
 ```
 
 The proxy must set the forwarding header from what *it* observed —
