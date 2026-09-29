@@ -43,6 +43,10 @@ services:
       # from the request (mcp.brainkb.org or mcp.sandbox.brainkb.org), else
       # mcp.brainkb.org. Set it per deployment, e.g. mcp.sandbox.brainkb.org.
       MCP_PUBLIC_HOST: ${MCP_PUBLIC_HOST:-}
+      # Connector-app OAuth key (see README "Connecting apps"). Leave unset only
+      # for throwaway runs: without it apps must reconnect after every restart.
+      MCP_OAUTH_SECRET: ${MCP_OAUTH_SECRET:-}
+      MCP_OAUTH_ENABLED: ${MCP_OAUTH_ENABLED:-true}
       # Directory brainkb_ingest_files may read. Paths resolve on the SERVER's
       # filesystem, so file ingest stays disabled here unless you set this — and
       # the path is INSIDE the container, so uncomment the volume mount below too.
