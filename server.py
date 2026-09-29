@@ -2077,16 +2077,26 @@ def brainkb_create_permission(name: str, resource: str, action: str, description
 # request echo beyond an escaped hostname.
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$")
+# Public MCP hosts the landing page may name in its sample commands. Any other
+# Host (localhost, a bare IP, a proxy's internal name) falls back to production,
+# so the page never tells people to register an address they can't reach.
+_PUBLIC_HOSTS = ("mcp.brainkb.org", "mcp.sandbox.brainkb.org")
+_DEFAULT_PUBLIC_HOST = "mcp.brainkb.org"
 
 
 def _self_host(request: Any) -> str:
-    """Hostname to show in the sample command, from the Host header.
+    """Public hostname to show in the sample commands.
 
-    Validated against a strict charset and HTML-escaped at the call site: Host is
-    caller-controlled, so an unvalidated value would be reflected markup.
+    MCP_PUBLIC_HOST, when set, always wins. Otherwise the Host header is used only
+    if it names a known public host; it is caller-controlled, so it is matched
+    against a fixed list (and HTML-escaped at the call site) rather than reflected.
     """
-    host = (request.headers.get("host") or "").split(",")[0].strip()
-    return host if _HOST_RE.match(host) else "mcp.brainkb.org"
+    configured = os.getenv("MCP_PUBLIC_HOST", "").strip().lower()
+    if configured and _HOST_RE.match(configured):
+        return configured
+    host = (request.headers.get("host") or "").split(",")[0].strip().lower()
+    host = host.split(":")[0]
+    return host if host in _PUBLIC_HOSTS else _DEFAULT_PUBLIC_HOST
 
 
 @mcp.custom_route("/upload", methods=["POST"])
@@ -2232,36 +2242,36 @@ async def _upload(request: Any) -> Any:
 _LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brainkb_logo.png")
 
 _LANDING_CSS = """
-:root{--ink:#192339;--muted:#738094;--blue:#4058e8;--line:#e4e8ef;--pale:#f5f7fc;--green:#30ad86}
+:root{--ink:#0b1628;--muted:#738094;--blue:#1d4ed8;--line:#e4e8ef;--pale:#f5f7fc;--green:#30ad86}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth;scroll-padding-top:95px}
 body{margin:0;background:#fff;color:var(--ink);font-family:'DM Sans',ui-sans-serif,system-ui,sans-serif;font-size:16px;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
 button{font:inherit;cursor:pointer}
-button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #a5b4ff;outline-offset:5px}
+button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #93c5fd;outline-offset:5px}
 code,pre,.mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
 .wrap{max-width:1200px;margin:auto;padding:0 36px}
 
 header{height:90px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
 .logo{display:flex;align-items:center;gap:12px;font-size:24px;font-weight:700;letter-spacing:-.8px}
 .logo img{width:40px;height:40px;border-radius:50%}
-.logo small{font:500 12px 'IBM Plex Mono',monospace;color:var(--blue);background:#f4f6ff;border:1px solid #e1e6ff;border-radius:4px;padding:3px 6px;letter-spacing:0}
+.logo small{font:500 12px 'IBM Plex Mono',monospace;color:var(--blue);background:#eff6ff;border:1px solid #dbeafe;border-radius:4px;padding:3px 6px;letter-spacing:0}
 nav{display:flex;align-items:center;gap:32px;font-size:14px;color:#596476}
 nav a:not(.btn):hover{color:var(--blue)}
 
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:7px;padding:13px 21px;font-size:14px;font-weight:600;transition:transform .2s,background .2s}
 .btn:hover{background:#f1f4ff;transform:translateY(-2px)}
-.primary{background:var(--blue);border-color:var(--blue);color:#fff;box-shadow:0 4px 9px #4058e820}
-.primary:hover{background:#3046cc}
+.primary{background:var(--blue);border-color:var(--blue);color:#fff;box-shadow:0 4px 9px #1d4ed820}
+.primary:hover{background:#1e40af}
 .navcta{padding:10px 17px}
 .eyebrow{font:12px 'IBM Plex Mono',monospace;letter-spacing:1.5px;color:var(--blue);text-transform:uppercase}
 
 .hero{padding:78px 0 62px;display:grid;grid-template-columns:1fr 1fr;gap:30px;align-items:center}
 .hero-copy{min-width:0}
-.badge{display:inline-flex;align-items:center;gap:10px;background:#f4f6ff;border:1px solid #e1e6ff;padding:7px 10px;border-radius:5px;font:12px 'IBM Plex Mono',monospace;color:#5362b3}
-.badge b{background:#e2e8ff;padding:3px 5px;font-weight:500;color:var(--blue)}
+.badge{display:inline-flex;align-items:center;gap:10px;background:#eff6ff;border:1px solid #dbeafe;padding:7px 10px;border-radius:5px;font:12px 'IBM Plex Mono',monospace;color:#1e3a8a}
+.badge b{background:#dbeafe;padding:3px 5px;font-weight:500;color:var(--blue)}
 h1{font-size:64px;line-height:1.04;letter-spacing:-3.2px;font-weight:550;margin:25px 0 23px}
-h1 span{color:var(--blue)}
+h1 span{background:linear-gradient(92deg,#0b1628 0%,#1d4ed8 70%,#3b82f6 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
 .lead{color:#6b7789;line-height:1.75;max-width:460px;font-size:17px}
 .actions{display:flex;gap:11px;margin:28px 0 19px;flex-wrap:wrap}
 .note{font-size:12px;color:#8690a1;font-family:'IBM Plex Mono',monospace}
@@ -2270,17 +2280,19 @@ h1 span{color:var(--blue)}
 .orbit{position:absolute;border:1px solid #e5e9f5;border-radius:50%;width:350px;height:350px}
 .orbit.second{width:240px;height:240px}
 .network{position:absolute;width:100%;height:100%;overflow:visible}
-.network path{fill:none;stroke:#c3cdfb;stroke-width:1.5;stroke-dasharray:5 5;animation:flow 20s linear infinite}
+.network path{fill:none;stroke:#93c5fd;stroke-width:1.5;stroke-dasharray:5 5;animation:flow 20s linear infinite}
 @keyframes flow{to{stroke-dashoffset:-200}}
-.core{z-index:2;width:150px;height:150px;border-radius:27px;background:#fff;border:1px solid #d9e0ff;box-shadow:0 14px 50px #4058e820,0 0 0 10px #ffffffa8;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px}
-.core img{width:64px;height:64px;border-radius:50%}
+.core{z-index:2;width:142px;height:142px;border-radius:27px;background:#fff;border:1px solid #bfdbfe;box-shadow:0 14px 50px #1d4ed820,0 0 0 10px #ffffffa8;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px}
+.core img{width:56px;height:56px;border-radius:50%}
 .core strong{font-size:14px}
 .node{position:absolute;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 5px 15px #26355607;padding:13px 16px;display:flex;align-items:center;gap:11px;font-size:14px;z-index:2}
 .node small{display:block;color:#8a93a4;font:11px 'IBM Plex Mono',monospace;margin-top:4px}
-.ico{height:31px;width:31px;flex:none;background:#f2f5fc;border:1px solid #e7ebf4;border-radius:7px;display:grid;place-items:center;color:#526ad2;font:17px 'IBM Plex Mono',monospace}
+.ico{height:31px;width:31px;flex:none;background:#eff6ff;border:1px solid #dbeafe;border-radius:7px;display:grid;place-items:center;color:#1e3a8a;font:17px 'IBM Plex Mono',monospace}
 .n1{top:37px;left:4%}.n2{right:0;top:80px}.n3{left:0;bottom:93px}.n4{right:4%;bottom:51px}
 .live{position:absolute;bottom:1px;font:11px 'IBM Plex Mono',monospace;color:#77869c;display:flex;align-items:center;gap:8px}
-.live i{width:6px;height:6px;background:var(--green);border-radius:100%}
+.live i{width:6px;height:6px;background:var(--green);border-radius:100%;box-shadow:0 0 0 3px #30ad8626}
+.live.down{color:#b4485b}
+.live.down i{background:#d9546b;box-shadow:0 0 0 3px #d9546b26}
 
 .strip{padding:27px 0 36px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);text-align:center}
 .strip p{font:11px 'IBM Plex Mono',monospace;color:#929baa;letter-spacing:1.4px;margin:0 0 24px}
@@ -2295,11 +2307,11 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 
 .features{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
 .card{border:1px solid var(--line);border-radius:12px;padding:27px;background:linear-gradient(150deg,#fff,#f9faff);display:flex;flex-direction:column}
-.card.highlight{border-color:#cfd9ff;box-shadow:0 10px 30px #4058e812}
+.card.highlight{border-color:#bfdbfe;box-shadow:0 10px 30px #1d4ed812}
 .card h3{font-weight:550;font-size:20px;letter-spacing:-.4px;margin:22px 0 10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.card h3 .count{font:500 11px 'IBM Plex Mono',monospace;color:var(--blue);background:#eaf0ff;border:1px solid #cfd9ff;border-radius:4px;padding:3px 6px;letter-spacing:0}
+.card h3 .count{font:500 11px 'IBM Plex Mono',monospace;color:var(--blue);background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;padding:3px 6px;letter-spacing:0}
 .card p{font-size:14px;line-height:1.7;color:var(--muted);margin:0}
-.card p code{font-size:12px;color:#596eaf}
+.card p code{font-size:12px;color:#1e40af}
 .card .ico{width:39px;height:39px;font-size:20px}
 .mini{margin-top:auto;padding-top:24px}
 .mini-box{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px 14px;font:11px 'IBM Plex Mono',monospace;color:#7a879b}
@@ -2313,7 +2325,12 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .codebox-head{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line);font:11px 'IBM Plex Mono',monospace;color:#929aad}
 .codebox pre{margin:0;padding:16px 18px;font-size:12.5px;line-height:1.8;color:#3d4c69;white-space:pre-wrap;word-break:break-all}
 .copy{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 9px;font:11px 'IBM Plex Mono',monospace;color:#788398}
-.copy:hover{color:var(--blue);border-color:#cfd9ff;background:#f4f6ff}
+.copy:hover{color:var(--blue);border-color:#bfdbfe;background:#eff6ff}
+.skillcard{margin-top:14px;display:flex;gap:16px;align-items:flex-start;border:1px solid #bfdbfe;border-radius:9px;padding:18px 20px;background:linear-gradient(150deg,#fff,#eff6ff)}
+.skillcard strong{font-size:16px;font-weight:600}
+.skillcard p{margin:6px 0 14px;font-size:14px}
+.skillcard .btn{padding:9px 15px;font-size:13px}
+details p a{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
 
 .workflow{background:#f7f9fd;border:1px solid var(--line);border-radius:14px;display:grid;grid-template-columns:.85fr 1.15fr;gap:40px;padding:42px;margin-bottom:75px}
 .workflow>*{min-width:0}
@@ -2321,14 +2338,17 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .workflow p{color:var(--muted);line-height:1.7;font-size:15px}
 .tabs{display:flex;gap:7px;margin-top:26px;flex-wrap:wrap}
 .tabs button{background:transparent;border:1px solid #dfe5ee;border-radius:5px;padding:8px 12px;font-size:12px;color:#788398}
-.tabs button[aria-pressed=true]{color:var(--blue);background:#eaf0ff;border-color:#cfd9ff}
+.tabs button[aria-pressed=true]{color:var(--blue);background:#eff6ff;border-color:#bfdbfe}
+.tabs button{position:relative;overflow:hidden}
+.tabs button.playing::after{content:'';position:absolute;left:0;bottom:0;height:2px;width:100%;background:var(--blue);transform-origin:left;animation:tabprogress 6.5s linear both}
+@keyframes tabprogress{from{transform:scaleX(0)}to{transform:scaleX(1)}}
 .terminal{background:#fff;border:1px solid #dde3ef;border-radius:9px;overflow:hidden;box-shadow:0 10px 25px #28375906}
 .terminal-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding:14px 18px;font:11px 'IBM Plex Mono',monospace;color:#929aad}
 .dots{letter-spacing:3px;color:#cbd3df}
 .terminal-body{padding:20px;font:12px/1.9 'IBM Plex Mono',monospace;min-height:250px;overflow-wrap:anywhere}
 .prompt{color:#3d4c69;margin-bottom:13px}
 .log{color:#8b96a8}
-.log strong{font-weight:400;color:#4e65ce}
+.log strong{font-weight:400;color:#1d4ed8}
 .log em{font-style:normal;color:#319575}
 .result{margin-top:14px;padding:9px 12px;border:1px solid #d7ede5;background:#f6fcf9;color:#34826c;border-radius:4px}
 .step{animation:appear .45s ease both}
@@ -2344,7 +2364,7 @@ summary::-webkit-details-marker{display:none}
 summary:after{content:'+';color:#8895ae}
 details[open] summary:after{content:'−'}
 details p{margin-bottom:0;font-size:14px!important}
-details p code{font-size:12.5px;color:#596eaf;background:var(--pale);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+details p code{font-size:12.5px;color:#1e40af;background:var(--pale);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
 
 .cta{border-top:1px solid var(--line);padding:45px 0;display:flex;align-items:center;justify-content:space-between;gap:24px}
 .cta h2{font-size:29px;margin:0}
@@ -2355,30 +2375,73 @@ footer{border-top:1px solid var(--line);padding:24px 0 30px;display:flex;justify
 
 @media(max-width:900px){h1{font-size:50px}.hero{gap:0}.node{padding:10px;font-size:12px}.hero-visual{transform:scale(.92)}.wrap{padding:0 24px}.workflow,.connect{gap:22px}.workflow{padding:28px}.lower{gap:40px}.features{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:680px){header{height:76px}nav{gap:15px}nav>a:not(.navcta){display:none}.logo small{display:none}.hero{grid-template-columns:1fr;padding-top:45px;gap:20px}h1{font-size:44px;letter-spacing:-2px}.hero-visual{height:380px;transform:none}.brands{flex-wrap:wrap;gap:20px;font-size:16px;justify-content:center}.section{padding:55px 0}.section-title{display:block}.section-title>p{margin-top:20px}.features,.workflow,.lower,.connect{grid-template-columns:1fr}.features{gap:12px}.workflow{padding:25px;margin-bottom:55px}.lower{gap:18px;padding-bottom:45px}.cta{display:block}.cta .btn{margin-top:15px}footer{gap:20px;flex-wrap:wrap}h2{font-size:31px}.note{font-size:11px}.terminal-body{font-size:11px;padding:15px}.n1{left:0}.n4{right:0}}
-@media(max-width:420px){.node small{display:none}.hero-visual{height:340px}.core{width:124px;height:124px}.core img{width:52px;height:52px}}
+@media(max-width:420px){.node small{display:none}.hero-visual{height:340px}.core{width:124px;height:124px}.core img{width:48px;height:48px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
 """
 
 _LANDING_JS = """
 (function () {
+  var status = document.getElementById('status');
+  if (status && window.fetch) {
+    var check = function () {
+      fetch('/healthz', {cache: 'no-store'}).then(function (r) { return r.ok; })
+        .catch(function () { return false; })
+        .then(function (up) {
+          status.classList.toggle('down', !up);
+          status.querySelector('span').textContent = up ? 'ONLINE' : 'OFFLINE';
+        });
+    };
+    check();
+    setInterval(check, 30000);
+  }
+})();
+(function () {
   var data = document.getElementById('session-data');
   var session = document.getElementById('session');
   if (data && session) {
     var examples = JSON.parse(data.textContent);
-    var render = function (key) {
-      var e = examples[key];
-      session.innerHTML = '<div class="prompt">\\u203a ' + e.prompt + '</div>' +
+    var keys = Object.keys(examples);
+    var buttons = document.querySelectorAll('[data-task]');
+    var current = 0, timer = null, paused = false;
+    var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var DWELL = 6500;
+    var render = function (idx) {
+      current = idx;
+      var e = examples[keys[idx]];
+      var step = 0.45;
+      session.innerHTML = '<div class="prompt step">› ' + e.prompt + '</div>' +
         e.lines.map(function (s, i) {
-          return '<div class="log step" style="animation-delay:' + (i * .13) + 's">0' + (i + 1) + ' &nbsp; ' + s + '</div>';
+          return '<div class="log step" style="animation-delay:' + (0.35 + i * step) + 's">0' + (i + 1) + ' &nbsp; ' + s + '</div>';
         }).join('') +
-        '<div class="result step" style="animation-delay:' + (e.lines.length * .13 + .1) + 's">' + e.result + '</div>';
-      document.querySelectorAll('[data-task]').forEach(function (b) {
-        b.setAttribute('aria-pressed', String(b.dataset.task === key));
+        '<div class="result step" style="animation-delay:' + (0.45 + e.lines.length * step) + 's">' + e.result + '</div>';
+      buttons.forEach(function (b) {
+        var on = b.dataset.task === keys[idx];
+        b.setAttribute('aria-pressed', String(on));
+        b.classList.remove('playing');
+        if (on && !reduced && !paused) { void b.offsetWidth; b.classList.add('playing'); }
       });
     };
-    document.querySelectorAll('[data-task]').forEach(function (b) {
-      b.addEventListener('click', function () { render(b.dataset.task); });
+    var schedule = function () {
+      clearTimeout(timer);
+      if (reduced || paused || document.hidden) return;
+      timer = setTimeout(function () { render((current + 1) % keys.length); schedule(); }, DWELL);
+    };
+    buttons.forEach(function (b) {
+      b.addEventListener('click', function () { render(keys.indexOf(b.dataset.task)); schedule(); });
     });
+    var box = document.getElementById('workflow');
+    var pause = function () { paused = true; clearTimeout(timer);
+      buttons.forEach(function (b) { b.classList.remove('playing'); }); };
+    var resume = function () { if (!paused) return; paused = false; render(current); schedule(); };
+    box.addEventListener('mouseenter', pause);
+    box.addEventListener('mouseleave', resume);
+    box.addEventListener('focusin', pause);
+    box.addEventListener('focusout', function (ev) { if (!box.contains(ev.relatedTarget)) resume(); });
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { clearTimeout(timer); } else { schedule(); }
+    });
+    render(current);
+    schedule();
   }
   document.querySelectorAll('.codebox').forEach(function (box) {
     var btn = box.querySelector('.copy');
@@ -2517,7 +2580,7 @@ async def _landing(request: Any) -> Any:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="BrainKB MCP connects AI agents to the BrainKB neuroscience knowledge graph through the Model Context Protocol.">
+<meta name="description" content="BrainKB MCP lets AI agents interact with the BrainKB knowledge base through the Model Context Protocol.">
 <title>BrainKB MCP</title>
 <link rel="icon" type="image/png" href="/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2540,30 +2603,32 @@ async def _landing(request: Any) -> Any:
 <main id="top">
 <section class="hero">
   <div class="hero-copy">
-    <div class="badge"><b>MCP</b> THE BRAINKB KNOWLEDGE GRAPH, FOR AGENTS</div>
-    <h1>Give your agent<br>a neuroscience<br><span>knowledge graph.</span></h1>
-    <p class="lead">Your agent signs in as you, ingests RDF into your workspaces, answers
-    questions over extracted entities, and traces the provenance of every triple.</p>
+    <div class="badge"><b>MCP</b> ACCESS BRAINKB FROM ANY MCP CLIENT</div>
+    <h1>Interact with<br>BrainKB through<br><span>your AI agent.</span></h1>
+    <p class="lead">BrainKB MCP connects your AI agent to the BrainKB knowledge base
+    through the Model Context Protocol. Ask in plain language, and your agent signs in as
+    you, ingests RDF into your workspaces, answers questions over extracted entities, and
+    traces where every triple came from.</p>
     <div class="actions">
       <a class="btn primary" href="#connect">Connect your agent</a>
       <a class="btn" href="#workflow">See it in action</a>
     </div>
     <div class="note">Per-caller identity. Provenance on every change.</div>
   </div>
-  <div class="hero-visual" aria-label="Diagram: BrainKB MCP connects your agent with workspaces, the knowledge graph and provenance">
+  <div class="hero-visual" aria-label="Diagram: BrainKB MCP connects your AI agent with BrainKB workspaces, the knowledge graph and provenance">
     <div class="orbit"></div><div class="orbit second"></div>
-    <svg class="network" viewBox="0 0 540 430" preserveAspectRatio="none" aria-hidden="true"><path d="M125 77 Q270 75 270 215 M425 118 Q400 215 270 215 M97 300 Q180 215 270 215 M425 338 Q270 355 270 215"/></svg>
+    <svg class="network" viewBox="0 0 540 430" aria-hidden="true"><path d="M125 77 Q270 75 270 215 M425 118 Q400 215 270 215 M97 300 Q180 215 270 215 M425 338 Q270 355 270 215"/></svg>
     <div class="node n1"><span class="ico">✳</span><div>Your agent<small>REASON &amp; PLAN</small></div></div>
     <div class="node n2"><span class="ico">▤</span><div>Workspaces<small>INGEST &amp; SHARE</small></div></div>
-    <div class="core"><img src="/logo.png" alt="BrainKB" width="64" height="64"><strong>One connection.</strong></div>
+    <div class="core"><img src="/logo.png" alt="BrainKB" width="56" height="56"><strong>One connection.</strong></div>
     <div class="node n3"><span class="ico">≋</span><div>Knowledge graph<small>QUERY &amp; DISCOVER</small></div></div>
     <div class="node n4"><span class="ico">↻</span><div>Provenance<small>TRACE &amp; AUDIT</small></div></div>
-    <div class="live"><i></i>ONLINE · {host}</div>
+    <div class="live" id="status" role="status"><i></i><span>ONLINE</span></div>
   </div>
 </section>
 
-<section class="strip" aria-label="What your agent works with">
-  <p>WHAT YOUR AGENT WORKS WITH</p>
+<section class="strip" aria-label="What you can reach in BrainKB">
+  <p>WHAT YOU CAN REACH IN BRAINKB</p>
   <div class="brands">
     <span><em>▤</em> Workspaces</span>
     <span><em>≋</em> RDF graphs</span>
@@ -2574,9 +2639,9 @@ async def _landing(request: Any) -> Any:
 
 <section class="section" id="capabilities">
   <div class="section-title">
-    <div><span class="eyebrow">Built for agents</span><h2>Less SPARQL.<br>More science.</h2></div>
-    <p>Ask in plain language and your agent does the rest. Every action is checked
-    against your role, space membership and access rules.</p>
+    <div><span class="eyebrow">Through MCP</span><h2>Less SPARQL.<br>More science.</h2></div>
+    <p>Ask in plain language and your agent picks the right BrainKB tools. Every action
+    runs as you, within your permissions.</p>
   </div>
   <div class="features">
 {features}
@@ -2588,7 +2653,7 @@ async def _landing(request: Any) -> Any:
     <span class="eyebrow">Connect</span>
     <h2>One command<br>to connect.</h2>
     <p>This host is an API, not a web app. The protocol endpoint is <code>/mcp</code>,
-    over streamable HTTP. Each caller authenticates per request with their own BrainKB
+    over streamable HTTP, so any MCP client that supports it can connect. Each caller authenticates per request with their own BrainKB
     credential: an <code>Authorization: Bearer</code> header, or a personal access token
     via the login tools. There is no shared or ambient identity.</p>
   </div>
@@ -2605,15 +2670,25 @@ requests.post("https://{host}/upload",
               headers={{"Authorization": f"Bearer {{TOKEN}}"}},
               data=open("review.ttl", "rb"))   # streamed off disk</pre>
     </div>
+    <div class="skillcard">
+      <span class="ico">◇</span>
+      <div>
+        <strong>Use it with BrainKB Skills</strong>
+        <p>Add the BrainKB skill to your agent as well. It teaches the agent how to use
+        this server well: confirm who it is acting as, ingest large files safely, pick the
+        right workspace and question, and answer provenance questions.</p>
+        <a class="btn" href="https://github.com/sensein/agent_skills/tree/main/skills/brainkb" target="_blank" rel="noopener">BrainKB Skills on GitHub ↗</a>
+      </div>
+    </div>
   </div>
 </section>
 
 <section class="workflow" id="workflow">
   <div>
     <span class="eyebrow">From question to answer</span>
-    <h2>Watch your agent<br>work the graph.</h2>
-    <p>Choose a task to follow an illustrative session, from checking identity to
-    returning a grounded result.</p>
+    <h2>Watch your agent<br>work with BrainKB.</h2>
+    <p>An illustrative session plays through each task, from checking identity to
+    returning a grounded result. Pick a task to jump to it; hover to pause.</p>
     <div class="tabs" role="group" aria-label="Example sessions">{tabs}</div>
   </div>
   <div class="terminal">
@@ -2627,14 +2702,19 @@ requests.post("https://{host}/upload",
     <span class="eyebrow">Open by design</span>
     <h2>Every triple<br>has a history.</h2>
     <p>Ingests are attributed to the account that made them and recorded as W3C PROV-O,
-    with the exact triples each job added. What your agent can see or change is decided
-    by your role, your space membership and any per-space access rules.</p>
+    with the exact triples each job added. Your agent can only see or change what you
+    are allowed to: your role decides what you may do, and a space's members and access
+    rules decide who may read or write it.</p>
   </div>
   <div>
     <details open><summary>What is BrainKB MCP?</summary><p>A Model Context Protocol
     server for the BrainKB knowledge base. MCP clients such as Claude Code connect to
     <code>https://{host}/mcp</code>, and your agent can then work with workspaces,
     ingest, search, ready-made questions and provenance on your behalf.</p></details>
+    <details><summary>Can I use BrainKB through skills?</summary><p>Yes. The
+    <a href="https://github.com/sensein/agent_skills/tree/main/skills/brainkb" target="_blank" rel="noopener">BrainKB skill</a> works alongside
+    this server: install it in your agent, and it guides the agent through sign-in,
+    ingest, questions and provenance using the server's tools.</p></details>
     <details><summary>How does my agent sign in?</summary><p>With a personal access token
     sent as an <code>Authorization: Bearer</code> header, or through the Globus, ORCID or
     GitHub login tools, which hand you a browser link. Every call runs as you.</p></details>
@@ -2652,8 +2732,8 @@ requests.post("https://{host}/upload",
 </section>
 
 <section class="cta">
-  <div><h2>Put the knowledge graph in your agent's hands.</h2>
-  <p>Register the server, sign in, and start asking.</p></div>
+  <div><h2>Start working with BrainKB from your agent.</h2>
+  <p>Register the server, sign in, and ask your first question.</p></div>
   <a class="btn primary" href="#connect">Connect your agent</a>
 </section>
 </main>
