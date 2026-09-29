@@ -2340,17 +2340,30 @@ details p a{color:var(--blue);text-decoration:underline;text-underline-offset:2p
 .tabs button{background:transparent;border:1px solid #dfe5ee;border-radius:5px;padding:8px 12px;font-size:12px;color:#788398}
 .tabs button[aria-pressed=true]{color:var(--blue);background:#eff6ff;border-color:#bfdbfe}
 .tabs button{position:relative;overflow:hidden}
-.tabs button.playing::after{content:'';position:absolute;left:0;bottom:0;height:2px;width:100%;background:var(--blue);transform-origin:left;animation:tabprogress 6.5s linear both}
+.tabs button.playing::after{content:'';position:absolute;left:0;bottom:0;height:2px;width:100%;background:var(--blue);transform-origin:left;animation:tabprogress var(--dwell,6.5s) linear both}
 @keyframes tabprogress{from{transform:scaleX(0)}to{transform:scaleX(1)}}
 .terminal{background:#fff;border:1px solid #dde3ef;border-radius:9px;overflow:hidden;box-shadow:0 10px 25px #28375906}
 .terminal-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding:14px 18px;font:11px 'IBM Plex Mono',monospace;color:#929aad}
 .dots{letter-spacing:3px;color:#cbd3df}
 .terminal-body{padding:20px;font:12px/1.9 'IBM Plex Mono',monospace;min-height:250px;overflow-wrap:anywhere}
+.terminal-body .result{overflow-x:auto}
 .prompt{color:#3d4c69;margin-bottom:13px}
 .log{color:#8b96a8}
 .log strong{font-weight:400;color:#1d4ed8}
 .log em{font-style:normal;color:#319575}
 .result{margin-top:14px;padding:9px 12px;border:1px solid #d7ede5;background:#f6fcf9;color:#34826c;border-radius:4px}
+.result b{font-weight:500;color:#1f6b55}
+.result .src{display:block;margin-top:6px;color:#6f8f84;font-size:11px}
+.result ul.notes{margin:8px 0 0;padding-left:16px;color:#3d4c69;font-size:11px;line-height:1.6}
+.result ul.notes li{margin:2px 0}
+.result ul.notes b{color:#1d4ed8}
+.rtable{width:100%;border-collapse:collapse;margin-top:8px;font-size:11px;line-height:1.5;color:#3d4c69;background:#fff;border:1px solid #d7ede5}
+.rtable th,.rtable td{text-align:left;padding:4px 8px;border-bottom:1px solid #e6f1ec;vertical-align:top}
+.rtable th{font-weight:500;color:#34826c;background:#f6fcf9;white-space:nowrap}
+.rtable{overflow-wrap:normal;word-break:normal}
+.rtable .n{text-align:right;white-space:nowrap}
+.rtable td:first-child{color:#1d4ed8;white-space:nowrap}
+.rtable tr:last-child td{border-bottom:0}
 .step{animation:appear .45s ease both}
 @keyframes appear{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 
@@ -2404,7 +2417,7 @@ _LANDING_JS = """
     var buttons = document.querySelectorAll('[data-task]');
     var current = 0, timer = null, paused = false;
     var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    var DWELL = 6500;
+    var kindEl = document.getElementById('session-kind');
     var render = function (idx) {
       current = idx;
       var e = examples[keys[idx]];
@@ -2414,17 +2427,19 @@ _LANDING_JS = """
           return '<div class="log step" style="animation-delay:' + (0.35 + i * step) + 's">0' + (i + 1) + ' &nbsp; ' + s + '</div>';
         }).join('') +
         '<div class="result step" style="animation-delay:' + (0.45 + e.lines.length * step) + 's">' + e.result + '</div>';
+      if (kindEl) kindEl.textContent = e.kind.toUpperCase();
       buttons.forEach(function (b) {
         var on = b.dataset.task === keys[idx];
         b.setAttribute('aria-pressed', String(on));
         b.classList.remove('playing');
+        b.style.setProperty('--dwell', e.dwell + 'ms');
         if (on && !reduced && !paused) { void b.offsetWidth; b.classList.add('playing'); }
       });
     };
     var schedule = function () {
       clearTimeout(timer);
       if (reduced || paused || document.hidden) return;
-      timer = setTimeout(function () { render((current + 1) % keys.length); schedule(); }, DWELL);
+      timer = setTimeout(function () { render((current + 1) % keys.length); schedule(); }, examples[keys[current]].dwell);
     };
     buttons.forEach(function (b) {
       b.addEventListener('click', function () { render(keys.indexOf(b.dataset.task)); schedule(); });
@@ -2485,23 +2500,136 @@ _LANDING_FEATURES = (
      ("Log me in with Globus", "Make me a token for this laptop")),
 )
 
-# Example sessions for the "how it works" terminal. Illustrative flows in plain
-# words, not live output; rendered server-side for the first tab and by JS on
-# tab change.
+# Example sessions for the "how it works" terminal, rendered server-side for the
+# first tab and by JS on tab change. "real" sessions replay actual answers from the
+# named-entity graph over three papers; "illustrative" ones show a flow with no
+# live data behind it. Keep the two labelled honestly.
+_REPLAY_SOURCES = ("10.1038/s41576-022-00509-1", "10.7554/eLife.47889", "10.3233/JAD-190687")
+# (entity key, papers, mentions, verbatim wording) — entities shared across sources.
+_REPLAY_SHARED = (
+    ('neocortex', 3, 10, 'isocortex · neocortex · mouse neocortex'),
+    ('transcription_factor', 2, 17, 'transcription factors · Transcription factor · Transcription factors · TF'),
+    ('single_cell_rna_seq', 2, 15, 'single cell RNA-seq · single-cell RNA-seq · scRNA-seq'),
+    ('rna_seq', 2, 13, 'RNA-seq · RNA sequencing'),
+    ('mus_musculus', 2, 15, 'mouse'),
+    ('hippocampus', 2, 7, 'hippocampus'),
+    ('developing_mouse_cortex', 2, 2, 'developing mouse cortex'),
+)
+
+
+# (term, likely label, 2019, 2020, 2023) — dated sources per year for entities
+# mapped exactly or closely to each term; "–" means no source that year.
+_REPLAY_TERMS_BY_YEAR = (
+    ("UBERON_0001950", "neocortex", "1", "1", "1"),
+    ("UBERON_0001954", "hippocampus (Ammon's horn)", "–", "1", "1"),
+    ("NCBITaxon_10090", "Mus musculus", "1", "–", "1"),
+    ("EFO_0008896", "RNA-seq", "1", "–", "1"),
+    ("EFO_0008913", "single-cell RNA-seq", "1", "–", "1"),
+    ("brainkb concept 7f506536…", "provisional", "1", "–", "1"),
+    ("brainkb concept ac3ec995…", "provisional", "1", "–", "1"),
+    ("brainkb concept d9d088dc…", "provisional", "1", "–", "1"),
+)
+
+
+# (relationship, count, what it claims) — ne_entity_external_mappings on the
+# sandbox named-entity test graph: 216 mappings for 215 entities.
+_REPLAY_MAPPINGS = (
+    ("exact", "192 (89%)", "The same concept; the only identity claim"),
+    ("close", "19", "Similar enough for some uses, but not the same"),
+    ("broad", "2", "The ontology term is more general than the entity"),
+    ("narrow", "1", "The ontology term is more specific than the entity"),
+    ("related", "2", "Associated, not the same"),
+)
+
+
+def _replay_table(headers: Any, rows: Any, numeric: Any = ()) -> str:
+    """A small results table for the replay terminal; `numeric` are column
+    indexes to right-align."""
+    def cell(tag: str, idx: int, value: Any) -> str:
+        cls = ' class="n"' if idx in numeric else ""
+        return f"<{tag}{cls}>{html.escape(str(value))}</{tag}>"
+    head = "".join(cell("th", i, h) for i, h in enumerate(headers))
+    body = "".join("<tr>" + "".join(cell("td", i, v) for i, v in enumerate(r)) + "</tr>"
+                   for r in rows)
+    return f'<table class="rtable"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+
+
+_REPLAY_SOURCES_HTML = " · ".join(html.escape(d) for d in _REPLAY_SOURCES)
+
 _LANDING_SESSIONS = {
-    "cells": {
-        "label": "Ask about cell types",
-        "prompt": "Which cell types express Pvalb, and which papers say so?",
+    "terms": {
+        "label": "Naming variants",
+        "kind": "Real data",
+        "dwell": 9000,
+        "prompt": "How is the neocortex written across the papers in BrainKB?",
         "lines": [
             "Confirms it is acting <strong>as you</strong>",
-            "Picks the <strong>cell–marker</strong> question from the ready-made set",
-            "Finds the entity <strong>Pvalb</strong> in the graph",
-            "Collects <strong>each paper's statement</strong> with its evidence",
+            "Picks the <strong>naming-variants</strong> question from the ready-made set",
+            "Finds the entity <strong>neocortex</strong> in the graph",
+            "Groups every <strong>verbatim mention</strong> by paper",
         ],
-        "result": "✓ An answer grounded in the papers, negative findings flagged.",
+        "result": ("✓ <b>3 papers · 10 mentions</b>, written as "
+                   "<b>isocortex</b> · <b>neocortex</b> · <b>mouse neocortex</b>"
+                   f'<span class="src">Sources: {_REPLAY_SOURCES_HTML}</span>'),
+    },
+    "shared": {
+        "label": "Shared entities",
+        "kind": "Real data",
+        "dwell": 12000,
+        "prompt": "Which entities do these papers share, and under what names?",
+        "lines": [
+            "Picks the <strong>shared-across-sources</strong> question",
+            "Counts <strong>papers</strong> and <strong>mentions</strong> per entity",
+            "Collects the <strong>verbatim wording</strong> each paper uses",
+        ],
+        "result": ("✓ <b>7 entities</b> appear in more than one paper"
+                   + _replay_table(("Entity", "Papers", "Mentions", "Verbatim wording"),
+                                   _REPLAY_SHARED, numeric=(1, 2))
+                   + f'<span class="src">Sources: {_REPLAY_SOURCES_HTML}</span>'),
+    },
+    "years": {
+        "label": "Trends by year",
+        "kind": "Real data",
+        "dwell": 12000,
+        "prompt": "How many dated sources mention entities mapped exactly or closely to each term, per year?",
+        "lines": [
+            "Picks the <strong>terms-by-year</strong> question",
+            "Follows <strong>exact and close</strong> ontology mappings to each term",
+            "Counts <strong>dated sources</strong> per publication year",
+        ],
+        "result": ("✓ <b>8 terms</b> appear in more than one year"
+                   + _replay_table(("Term", "Likely label", "2019", "2020", "2023"),
+                                   _REPLAY_TERMS_BY_YEAR, numeric=(2, 3, 4))
+                   + f'<span class="src">Sources: {_REPLAY_SOURCES_HTML}</span>'),
+    },
+    "mappings": {
+        "label": "Mapping review",
+        "kind": "Real data",
+        "dwell": 15000,
+        "prompt": "What is each entity mapped to, and at which mapping relationship?",
+        "lines": [
+            "Picks the <strong>mapping-relationship</strong> question",
+            "Reads <strong>exact, close, broad, narrow</strong> and <strong>related</strong> matches",
+            "Leaves out <strong>provisional BRAINKB</strong> concepts, which count as unmapped",
+            "Flags the <strong>non-exact</strong> matches for review",
+        ],
+        "result": ("✓ <b>216 mappings</b> for <b>215 entities</b>"
+                   + _replay_table(("Relationship", "Count", "What it claims"),
+                                   _REPLAY_MAPPINGS, numeric=(1,))
+                   + '<ul class="notes">'
+                   '<li><b>hippocampus</b> is only a close match: UBERON:0001954 is Ammon\'s '
+                   'horn, which is narrower than the hippocampus.</li>'
+                   '<li><b>chromatin_immunoprecipitation</b> has two exact targets, '
+                   'EFO:0004176 and OBI:0001975. Fine, but worth a quick check.</li>'
+                   '<li><b>762 provisional BRAINKB concepts</b> are left out; they count '
+                   'as unmapped.</li></ul>'
+                   '<span class="src">Graph: sandbox named-entity test graph. Mappings '
+                   'belong to the entity, not to any one paper.</span>'),
     },
     "ingest": {
         "label": "Ingest a file",
+        "kind": "Illustrative",
+        "dwell": 6500,
         "prompt": "Ingest review.ttl into my lab space.",
         "lines": [
             "Confirms it is acting <strong>as you</strong>",
@@ -2513,7 +2641,9 @@ _LANDING_SESSIONS = {
     },
     "history": {
         "label": "Trace a change",
-        "prompt": "What changed in the hmba space this week, and who did it?",
+        "kind": "Illustrative",
+        "dwell": 6500,
+        "prompt": "What changed in my lab space this week, and who did it?",
         "lines": [
             "Lists the <strong>graphs</strong> in the space",
             "Reads each graph's <strong>change log</strong>",
@@ -2557,7 +2687,7 @@ async def _landing(request: Any) -> Any:
                 "◈", "Ready-made questions",
                 "Vetted questions about extracted entities, cells, markers, phenotypes "
                 "and causal claims, answered from the graph without writing a query.",
-                ("Which cells express Pvalb?", "Which papers mention the hippocampus?"),
+                ("How is the neocortex written across papers?", "Which entities do these papers share?"),
                 highlight=True, count=f"{total} questions"))
         else:
             icon, title, desc, examples = f
@@ -2571,7 +2701,8 @@ async def _landing(request: Any) -> Any:
         for k, v in _LANDING_SESSIONS.items()
     )
     session_json = jsonlib.dumps(
-        {k: {"prompt": v["prompt"], "lines": v["lines"], "result": v["result"]}
+        {k: {"prompt": v["prompt"], "lines": v["lines"], "result": v["result"],
+             "kind": v["kind"], "dwell": v["dwell"]}
          for k, v in _LANDING_SESSIONS.items()}
     ).replace("</", "<\\/")
 
@@ -2687,12 +2818,13 @@ requests.post("https://{host}/upload",
   <div>
     <span class="eyebrow">From question to answer</span>
     <h2>Watch your agent<br>work with BrainKB.</h2>
-    <p>An illustrative session plays through each task, from checking identity to
-    returning a grounded result. Pick a task to jump to it; hover to pause.</p>
+    <p>Replays of real answers from BrainKB: naming variants, shared entities and
+    trends by year across three papers, and a mapping review of the sandbox test
+    graph. Then illustrative ingest and provenance flows. Pick a task to jump to it; hover to pause.</p>
     <div class="tabs" role="group" aria-label="Example sessions">{tabs}</div>
   </div>
   <div class="terminal">
-    <div class="terminal-head"><span><span class="dots">●●●</span> &nbsp; agent-session</span><span>EXAMPLE</span></div>
+    <div class="terminal-head"><span><span class="dots">●●●</span> &nbsp; agent-session</span><span id="session-kind">{html.escape(_LANDING_SESSIONS[first]["kind"]).upper()}</span></div>
     <div class="terminal-body" id="session" aria-live="polite">{_session_html(first)}</div>
   </div>
 </section>
