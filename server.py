@@ -1454,8 +1454,6 @@ def _ingest_path(p: str) -> str:
     realpath() first, so symlinks cannot point out of the configured root.
     """
     rp = os.path.realpath(os.path.expanduser(p))
-    if _UPLOAD_DIR_NOTE:
-        warn(_UPLOAD_DIR_NOTE)
     if _INGEST_ROOT:
         root = os.path.realpath(os.path.expanduser(_INGEST_ROOT))
         if rp != root and not rp.startswith(root + os.sep):
@@ -2229,53 +2227,458 @@ async def _upload(request: Any) -> Any:
     }, 201)
 
 
+# Landing page for a browser that opens the server root. The CSS, JS and page
+# data are kept out of the f-string in _landing so their braces need no escaping.
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brainkb_logo.png")
+
+_LANDING_CSS = """
+:root{--ink:#192339;--muted:#738094;--blue:#4058e8;--line:#e4e8ef;--pale:#f5f7fc;--green:#30ad86}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:95px}
+body{margin:0;background:#fff;color:var(--ink);font-family:'DM Sans',ui-sans-serif,system-ui,sans-serif;font-size:16px;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+button{font:inherit;cursor:pointer}
+button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #a5b4ff;outline-offset:5px}
+code,pre,.mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+.wrap{max-width:1200px;margin:auto;padding:0 36px}
+
+header{height:90px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
+.logo{display:flex;align-items:center;gap:12px;font-size:24px;font-weight:700;letter-spacing:-.8px}
+.logo img{width:40px;height:40px;border-radius:50%}
+.logo small{font:500 12px 'IBM Plex Mono',monospace;color:var(--blue);background:#f4f6ff;border:1px solid #e1e6ff;border-radius:4px;padding:3px 6px;letter-spacing:0}
+nav{display:flex;align-items:center;gap:32px;font-size:14px;color:#596476}
+nav a:not(.btn):hover{color:var(--blue)}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:7px;padding:13px 21px;font-size:14px;font-weight:600;transition:transform .2s,background .2s}
+.btn:hover{background:#f1f4ff;transform:translateY(-2px)}
+.primary{background:var(--blue);border-color:var(--blue);color:#fff;box-shadow:0 4px 9px #4058e820}
+.primary:hover{background:#3046cc}
+.navcta{padding:10px 17px}
+.eyebrow{font:12px 'IBM Plex Mono',monospace;letter-spacing:1.5px;color:var(--blue);text-transform:uppercase}
+
+.hero{padding:78px 0 62px;display:grid;grid-template-columns:1fr 1fr;gap:30px;align-items:center}
+.hero-copy{min-width:0}
+.badge{display:inline-flex;align-items:center;gap:10px;background:#f4f6ff;border:1px solid #e1e6ff;padding:7px 10px;border-radius:5px;font:12px 'IBM Plex Mono',monospace;color:#5362b3}
+.badge b{background:#e2e8ff;padding:3px 5px;font-weight:500;color:var(--blue)}
+h1{font-size:64px;line-height:1.04;letter-spacing:-3.2px;font-weight:550;margin:25px 0 23px}
+h1 span{color:var(--blue)}
+.lead{color:#6b7789;line-height:1.75;max-width:460px;font-size:17px}
+.actions{display:flex;gap:11px;margin:28px 0 19px;flex-wrap:wrap}
+.note{font-size:12px;color:#8690a1;font-family:'IBM Plex Mono',monospace}
+
+.hero-visual{height:430px;position:relative;background-image:radial-gradient(#dce2ee 1px,transparent 1px);background-size:18px 18px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.orbit{position:absolute;border:1px solid #e5e9f5;border-radius:50%;width:350px;height:350px}
+.orbit.second{width:240px;height:240px}
+.network{position:absolute;width:100%;height:100%;overflow:visible}
+.network path{fill:none;stroke:#c3cdfb;stroke-width:1.5;stroke-dasharray:5 5;animation:flow 20s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-200}}
+.core{z-index:2;width:150px;height:150px;border-radius:27px;background:#fff;border:1px solid #d9e0ff;box-shadow:0 14px 50px #4058e820,0 0 0 10px #ffffffa8;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px}
+.core img{width:64px;height:64px;border-radius:50%}
+.core strong{font-size:14px}
+.node{position:absolute;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 5px 15px #26355607;padding:13px 16px;display:flex;align-items:center;gap:11px;font-size:14px;z-index:2}
+.node small{display:block;color:#8a93a4;font:11px 'IBM Plex Mono',monospace;margin-top:4px}
+.ico{height:31px;width:31px;flex:none;background:#f2f5fc;border:1px solid #e7ebf4;border-radius:7px;display:grid;place-items:center;color:#526ad2;font:17px 'IBM Plex Mono',monospace}
+.n1{top:37px;left:4%}.n2{right:0;top:80px}.n3{left:0;bottom:93px}.n4{right:4%;bottom:51px}
+.live{position:absolute;bottom:1px;font:11px 'IBM Plex Mono',monospace;color:#77869c;display:flex;align-items:center;gap:8px}
+.live i{width:6px;height:6px;background:var(--green);border-radius:100%}
+
+.strip{padding:27px 0 36px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);text-align:center}
+.strip p{font:11px 'IBM Plex Mono',monospace;color:#929baa;letter-spacing:1.4px;margin:0 0 24px}
+.brands{display:flex;align-items:center;justify-content:space-around;color:#5f6878;font-weight:600;font-size:20px}
+.brands span{display:flex;gap:9px;align-items:center}
+.brands em{font-style:normal;font-size:23px;color:#808b9f}
+
+.section{padding:80px 0}
+.section-title{display:flex;justify-content:space-between;align-items:end;gap:30px;margin-bottom:33px}
+h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-height:1.18}
+.section-title>p{max-width:360px;line-height:1.7;font-size:15px;color:var(--muted);margin:0}
+
+.features{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
+.card{border:1px solid var(--line);border-radius:12px;padding:27px;background:linear-gradient(150deg,#fff,#f9faff);display:flex;flex-direction:column}
+.card.highlight{border-color:#cfd9ff;box-shadow:0 10px 30px #4058e812}
+.card h3{font-weight:550;font-size:20px;letter-spacing:-.4px;margin:22px 0 10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.card h3 .count{font:500 11px 'IBM Plex Mono',monospace;color:var(--blue);background:#eaf0ff;border:1px solid #cfd9ff;border-radius:4px;padding:3px 6px;letter-spacing:0}
+.card p{font-size:14px;line-height:1.7;color:var(--muted);margin:0}
+.card p code{font-size:12px;color:#596eaf}
+.card .ico{width:39px;height:39px;font-size:20px}
+.mini{margin-top:auto;padding-top:24px}
+.mini-box{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px 14px;font:11px 'IBM Plex Mono',monospace;color:#7a879b}
+.mini-line{display:flex;align-items:baseline;gap:8px;margin:5px 0;color:var(--blue)}
+.mini-line b{font-weight:400;color:#3d4c69}
+
+.connect{display:grid;grid-template-columns:.85fr 1.15fr;gap:40px;align-items:start;padding:0 0 80px}
+.connect p{color:var(--muted);line-height:1.7;font-size:15px}
+.codebox{position:relative;border:1px solid #dde3ef;border-radius:9px;background:#fff;box-shadow:0 10px 25px #28375906;overflow:hidden}
+.codebox + .codebox{margin-top:14px}
+.codebox-head{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line);font:11px 'IBM Plex Mono',monospace;color:#929aad}
+.codebox pre{margin:0;padding:16px 18px;font-size:12.5px;line-height:1.8;color:#3d4c69;white-space:pre-wrap;word-break:break-all}
+.copy{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 9px;font:11px 'IBM Plex Mono',monospace;color:#788398}
+.copy:hover{color:var(--blue);border-color:#cfd9ff;background:#f4f6ff}
+
+.workflow{background:#f7f9fd;border:1px solid var(--line);border-radius:14px;display:grid;grid-template-columns:.85fr 1.15fr;gap:40px;padding:42px;margin-bottom:75px}
+.workflow>*{min-width:0}
+.workflow h2{font-size:35px}
+.workflow p{color:var(--muted);line-height:1.7;font-size:15px}
+.tabs{display:flex;gap:7px;margin-top:26px;flex-wrap:wrap}
+.tabs button{background:transparent;border:1px solid #dfe5ee;border-radius:5px;padding:8px 12px;font-size:12px;color:#788398}
+.tabs button[aria-pressed=true]{color:var(--blue);background:#eaf0ff;border-color:#cfd9ff}
+.terminal{background:#fff;border:1px solid #dde3ef;border-radius:9px;overflow:hidden;box-shadow:0 10px 25px #28375906}
+.terminal-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding:14px 18px;font:11px 'IBM Plex Mono',monospace;color:#929aad}
+.dots{letter-spacing:3px;color:#cbd3df}
+.terminal-body{padding:20px;font:12px/1.9 'IBM Plex Mono',monospace;min-height:250px;overflow-wrap:anywhere}
+.prompt{color:#3d4c69;margin-bottom:13px}
+.log{color:#8b96a8}
+.log strong{font-weight:400;color:#4e65ce}
+.log em{font-style:normal;color:#319575}
+.result{margin-top:14px;padding:9px 12px;border:1px solid #d7ede5;background:#f6fcf9;color:#34826c;border-radius:4px}
+.step{animation:appear .45s ease both}
+@keyframes appear{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+
+.lower{display:grid;grid-template-columns:1fr 1fr;gap:90px;padding-bottom:80px}
+.lower>*{min-width:0}
+.lower h2{font-size:35px}
+.lower p{color:var(--muted);font-size:15px;line-height:1.8}
+details{border-bottom:1px solid var(--line);padding:19px 0}
+summary{cursor:pointer;font-size:15px;list-style:none;display:flex;justify-content:space-between;gap:20px}
+summary::-webkit-details-marker{display:none}
+summary:after{content:'+';color:#8895ae}
+details[open] summary:after{content:'−'}
+details p{margin-bottom:0;font-size:14px!important}
+details p code{font-size:12.5px;color:#596eaf;background:var(--pale);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+
+.cta{border-top:1px solid var(--line);padding:45px 0;display:flex;align-items:center;justify-content:space-between;gap:24px}
+.cta h2{font-size:29px;margin:0}
+.cta p{color:var(--muted);font-size:14px}
+footer{border-top:1px solid var(--line);padding:24px 0 30px;display:flex;justify-content:space-between;color:#939baa;font-size:12px}
+.footerlinks{display:flex;gap:23px}
+.footerlinks a:hover{color:var(--blue)}
+
+@media(max-width:900px){h1{font-size:50px}.hero{gap:0}.node{padding:10px;font-size:12px}.hero-visual{transform:scale(.92)}.wrap{padding:0 24px}.workflow,.connect{gap:22px}.workflow{padding:28px}.lower{gap:40px}.features{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){header{height:76px}nav{gap:15px}nav>a:not(.navcta){display:none}.logo small{display:none}.hero{grid-template-columns:1fr;padding-top:45px;gap:20px}h1{font-size:44px;letter-spacing:-2px}.hero-visual{height:380px;transform:none}.brands{flex-wrap:wrap;gap:20px;font-size:16px;justify-content:center}.section{padding:55px 0}.section-title{display:block}.section-title>p{margin-top:20px}.features,.workflow,.lower,.connect{grid-template-columns:1fr}.features{gap:12px}.workflow{padding:25px;margin-bottom:55px}.lower{gap:18px;padding-bottom:45px}.cta{display:block}.cta .btn{margin-top:15px}footer{gap:20px;flex-wrap:wrap}h2{font-size:31px}.note{font-size:11px}.terminal-body{font-size:11px;padding:15px}.n1{left:0}.n4{right:0}}
+@media(max-width:420px){.node small{display:none}.hero-visual{height:340px}.core{width:124px;height:124px}.core img{width:52px;height:52px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
+"""
+
+_LANDING_JS = """
+(function () {
+  var data = document.getElementById('session-data');
+  var session = document.getElementById('session');
+  if (data && session) {
+    var examples = JSON.parse(data.textContent);
+    var render = function (key) {
+      var e = examples[key];
+      session.innerHTML = '<div class="prompt">\\u203a ' + e.prompt + '</div>' +
+        e.lines.map(function (s, i) {
+          return '<div class="log step" style="animation-delay:' + (i * .13) + 's">0' + (i + 1) + ' &nbsp; ' + s + '</div>';
+        }).join('') +
+        '<div class="result step" style="animation-delay:' + (e.lines.length * .13 + .1) + 's">' + e.result + '</div>';
+      document.querySelectorAll('[data-task]').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.dataset.task === key));
+      });
+    };
+    document.querySelectorAll('[data-task]').forEach(function (b) {
+      b.addEventListener('click', function () { render(b.dataset.task); });
+    });
+  }
+  document.querySelectorAll('.codebox').forEach(function (box) {
+    var btn = box.querySelector('.copy');
+    if (!btn) return;
+    if (!navigator.clipboard) { btn.remove(); return; }
+    btn.addEventListener('click', function () {
+      navigator.clipboard.writeText(box.querySelector('pre').innerText).then(function () {
+        btn.textContent = 'Copied';
+        setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+      });
+    });
+  });
+})();
+"""
+
+# Capability cards: (icon, title, description, example requests). The page is for
+# people, so the examples are things a user asks their agent, not tool names. The
+# ready-made-questions card is built at request time so its count comes from the
+# QA registry.
+_LANDING_FEATURES = (
+    ("↓", "Ingest",
+     "Load RDF from text, files or large streamed uploads. Every ingest runs as a "
+     "background job, attributed to you.",
+     ("Ingest review.ttl into my lab space", "Did last night's ingest finish?")),
+    ("⌕", "Search and read",
+     "Search everything you may read, open a whole space, or list the graphs in the "
+     "knowledge base.",
+     ("Find anything about Purkinje cells", "What's in the hmba space?")),
+    None,  # ready-made questions
+    ("↻", "Provenance",
+     "See the history of any graph: who added what, when, and the exact triples each "
+     "ingest contributed.",
+     ("What changed in my space this week?", "Who added these triples?")),
+    ("▤", "Workspaces",
+     "Create private or public spaces, for yourself or a team, and choose who can read "
+     "or edit them.",
+     ("Create a private space for my lab", "Give alice@lab.org edit access")),
+    ("⚿", "Identity and access",
+     "Sign in with Globus, ORCID or GitHub, keep a personal access token, and let "
+     "admins manage roles and permissions.",
+     ("Log me in with Globus", "Make me a token for this laptop")),
+)
+
+# Example sessions for the "how it works" terminal. Illustrative flows in plain
+# words, not live output; rendered server-side for the first tab and by JS on
+# tab change.
+_LANDING_SESSIONS = {
+    "cells": {
+        "label": "Ask about cell types",
+        "prompt": "Which cell types express Pvalb, and which papers say so?",
+        "lines": [
+            "Confirms it is acting <strong>as you</strong>",
+            "Picks the <strong>cell–marker</strong> question from the ready-made set",
+            "Finds the entity <strong>Pvalb</strong> in the graph",
+            "Collects <strong>each paper's statement</strong> with its evidence",
+        ],
+        "result": "✓ An answer grounded in the papers, negative findings flagged.",
+    },
+    "ingest": {
+        "label": "Ingest a file",
+        "prompt": "Ingest review.ttl into my lab space.",
+        "lines": [
+            "Confirms it is acting <strong>as you</strong>",
+            "Finds <strong>your lab space</strong> and its graph",
+            "Streams the file <strong>straight from disk</strong>",
+            "Checks the <strong>triple count</strong> against the file",
+        ],
+        "result": "✓ Ingested, attributed to you, and nothing lost.",
+    },
+    "history": {
+        "label": "Trace a change",
+        "prompt": "What changed in the hmba space this week, and who did it?",
+        "lines": [
+            "Lists the <strong>graphs</strong> in the space",
+            "Reads each graph's <strong>change log</strong>",
+            "Looks up <strong>who</strong> ran each ingest",
+            "Pulls the <strong>exact triples</strong> that were added",
+        ],
+        "result": "✓ A dated change log with the person behind each change.",
+    },
+}
+
+
+def _session_html(key: str) -> str:
+    e = _LANDING_SESSIONS[key]
+    lines = "".join(
+        f'<div class="log">0{i + 1} &nbsp; {line}</div>' for i, line in enumerate(e["lines"])
+    )
+    return f'<div class="prompt">› {e["prompt"]}</div>{lines}<div class="result">{e["result"]}</div>'
+
+
+def _feature_card(icon: str, title: str, desc: str, examples: Any,
+                  highlight: bool = False, count: str = "") -> str:
+    count_html = f'<span class="count">{count}</span>' if count else ""
+    rows = "".join(f'<div class="mini-line">› <b>{html.escape(e)}</b></div>' for e in examples)
+    return (f'<article class="card{" highlight" if highlight else ""}">'
+            f'<span class="ico">{icon}</span><h3>{html.escape(title)}{count_html}</h3>'
+            f'<p>{desc}</p><div class="mini"><div class="mini-box">{rows}</div></div></article>')
+
+
 @mcp.custom_route("/", methods=["GET"])
 async def _landing(request: Any) -> Any:
     from starlette.responses import HTMLResponse
 
     host = html.escape(_self_host(request))
+    cats = qa_registry.categories()
+    total = sum(c["query_count"] for c in cats)
+
+    cards = []
+    for f in _LANDING_FEATURES:
+        if f is None:
+            cards.append(_feature_card(
+                "◈", "Ready-made questions",
+                "Vetted questions about extracted entities, cells, markers, phenotypes "
+                "and causal claims, answered from the graph without writing a query.",
+                ("Which cells express Pvalb?", "Which papers mention the hippocampus?"),
+                highlight=True, count=f"{total} questions"))
+        else:
+            icon, title, desc, examples = f
+            cards.append(_feature_card(icon, title, html.escape(desc), examples))
+    features = "\n".join(cards)
+
+    first = next(iter(_LANDING_SESSIONS))
+    tabs = "".join(
+        f'<button type="button" aria-pressed="{"true" if k == first else "false"}" '
+        f'data-task="{k}">{html.escape(v["label"])}</button>'
+        for k, v in _LANDING_SESSIONS.items()
+    )
+    session_json = jsonlib.dumps(
+        {k: {"prompt": v["prompt"], "lines": v["lines"], "result": v["result"]}
+         for k, v in _LANDING_SESSIONS.items()}
+    ).replace("</", "<\\/")
+
     body = f"""<!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="BrainKB MCP connects AI agents to the BrainKB neuroscience knowledge graph through the Model Context Protocol.">
 <title>BrainKB MCP</title>
-<style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
-         max-width: 46rem; margin: 4rem auto; padding: 0 1.25rem; }}
-  code, pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }}
-  pre {{ padding: .85rem 1rem; border-radius: .5rem; overflow-x: auto;
-        background: color-mix(in srgb, currentColor 8%, transparent); }}
-  h1 {{ font-size: 1.5rem; margin-bottom: .25rem; }}
-  .sub {{ opacity: .7; margin-top: 0; }}
-</style>
-<h1>BrainKB MCP</h1>
-<p class="sub">Model Context Protocol server for the BrainKB knowledge base.</p>
-<p>This is an API host, not a web app. The protocol endpoint is
-<code>/mcp</code> and speaks MCP over streamable HTTP — it is meant for an MCP
-client, not a browser.</p>
-<p>Register it with Claude Code:</p>
-<pre>claude mcp add --scope user --transport http brainkb https://{host}/mcp</pre>
-<p>Each caller authenticates <strong>per request</strong> with their own BrainKB
-credential — an <code>Authorization: Bearer</code> header, or a Personal Access
-Token via the login tools. There is no shared or ambient identity.</p>
-<p><strong>Ingesting a large RDF file.</strong> MCP tool arguments are written by the
-model, so a file passed through one has to be re-typed token by token — unusable above
-a few KB, and unsafe for RDF. Stream it here instead, and the server ingests it
-through the same API the tools use:</p>
-<pre>import requests
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;550;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>{_LANDING_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <a class="logo" href="#top" aria-label="BrainKB MCP home"><img src="/logo.png" alt="" width="40" height="40">BrainKB <small>MCP</small></a>
+  <nav aria-label="Main navigation">
+    <a href="#capabilities">Capabilities</a>
+    <a href="#workflow">How it works</a>
+    <a href="#questions">Questions</a>
+    <a class="btn navcta primary" href="#connect">Connect your agent</a>
+  </nav>
+</header>
+
+<main id="top">
+<section class="hero">
+  <div class="hero-copy">
+    <div class="badge"><b>MCP</b> THE BRAINKB KNOWLEDGE GRAPH, FOR AGENTS</div>
+    <h1>Give your agent<br>a neuroscience<br><span>knowledge graph.</span></h1>
+    <p class="lead">Your agent signs in as you, ingests RDF into your workspaces, answers
+    questions over extracted entities, and traces the provenance of every triple.</p>
+    <div class="actions">
+      <a class="btn primary" href="#connect">Connect your agent</a>
+      <a class="btn" href="#workflow">See it in action</a>
+    </div>
+    <div class="note">Per-caller identity. Provenance on every change.</div>
+  </div>
+  <div class="hero-visual" aria-label="Diagram: BrainKB MCP connects your agent with workspaces, the knowledge graph and provenance">
+    <div class="orbit"></div><div class="orbit second"></div>
+    <svg class="network" viewBox="0 0 540 430" preserveAspectRatio="none" aria-hidden="true"><path d="M125 77 Q270 75 270 215 M425 118 Q400 215 270 215 M97 300 Q180 215 270 215 M425 338 Q270 355 270 215"/></svg>
+    <div class="node n1"><span class="ico">✳</span><div>Your agent<small>REASON &amp; PLAN</small></div></div>
+    <div class="node n2"><span class="ico">▤</span><div>Workspaces<small>INGEST &amp; SHARE</small></div></div>
+    <div class="core"><img src="/logo.png" alt="BrainKB" width="64" height="64"><strong>One connection.</strong></div>
+    <div class="node n3"><span class="ico">≋</span><div>Knowledge graph<small>QUERY &amp; DISCOVER</small></div></div>
+    <div class="node n4"><span class="ico">↻</span><div>Provenance<small>TRACE &amp; AUDIT</small></div></div>
+    <div class="live"><i></i>ONLINE · {host}</div>
+  </div>
+</section>
+
+<section class="strip" aria-label="What your agent works with">
+  <p>WHAT YOUR AGENT WORKS WITH</p>
+  <div class="brands">
+    <span><em>▤</em> Workspaces</span>
+    <span><em>≋</em> RDF graphs</span>
+    <span><em>◈</em> Named entities</span>
+    <span><em>↻</em> PROV-O provenance</span>
+  </div>
+</section>
+
+<section class="section" id="capabilities">
+  <div class="section-title">
+    <div><span class="eyebrow">Built for agents</span><h2>Less SPARQL.<br>More science.</h2></div>
+    <p>Ask in plain language and your agent does the rest. Every action is checked
+    against your role, space membership and access rules.</p>
+  </div>
+  <div class="features">
+{features}
+  </div>
+</section>
+
+<section class="connect" id="connect">
+  <div>
+    <span class="eyebrow">Connect</span>
+    <h2>One command<br>to connect.</h2>
+    <p>This host is an API, not a web app. The protocol endpoint is <code>/mcp</code>,
+    over streamable HTTP. Each caller authenticates per request with their own BrainKB
+    credential: an <code>Authorization: Bearer</code> header, or a personal access token
+    via the login tools. There is no shared or ambient identity.</p>
+  </div>
+  <div>
+    <div class="codebox">
+      <div class="codebox-head"><span>Claude Code</span><button class="copy" type="button">Copy</button></div>
+      <pre>claude mcp add --scope user --transport http brainkb https://{host}/mcp</pre>
+    </div>
+    <div class="codebox">
+      <div class="codebox-head"><span>Large RDF file · python</span><button class="copy" type="button">Copy</button></div>
+      <pre>import requests
 requests.post("https://{host}/upload",
               params={{"filename": "review.ttl", "graph": "&lt;graph_iri&gt;"}},
               headers={{"Authorization": f"Bearer {{TOKEN}}"}},
               data=open("review.ttl", "rb"))   # streamed off disk</pre>
-<p>Answers <code>202</code> with an <code>upload_id</code> and ingests in the
-background. Omit <code>&amp;graph</code> to stage only, then call
-<code>brainkb_ingest_upload</code>. Up to 5&nbsp;GB per file.</p>
-<p>Opening <code>/mcp</code> in a browser returns
-<code>Not Acceptable: Client must accept text/event-stream</code>. That is the
-endpoint working correctly: a browser GET sends no
-<code>Accept: text/event-stream</code>, so the server refuses it.</p>
+    </div>
+  </div>
+</section>
+
+<section class="workflow" id="workflow">
+  <div>
+    <span class="eyebrow">From question to answer</span>
+    <h2>Watch your agent<br>work the graph.</h2>
+    <p>Choose a task to follow an illustrative session, from checking identity to
+    returning a grounded result.</p>
+    <div class="tabs" role="group" aria-label="Example sessions">{tabs}</div>
+  </div>
+  <div class="terminal">
+    <div class="terminal-head"><span><span class="dots">●●●</span> &nbsp; agent-session</span><span>EXAMPLE</span></div>
+    <div class="terminal-body" id="session" aria-live="polite">{_session_html(first)}</div>
+  </div>
+</section>
+
+<section class="lower" id="questions">
+  <div>
+    <span class="eyebrow">Open by design</span>
+    <h2>Every triple<br>has a history.</h2>
+    <p>Ingests are attributed to the account that made them and recorded as W3C PROV-O,
+    with the exact triples each job added. What your agent can see or change is decided
+    by your role, your space membership and any per-space access rules.</p>
+  </div>
+  <div>
+    <details open><summary>What is BrainKB MCP?</summary><p>A Model Context Protocol
+    server for the BrainKB knowledge base. MCP clients such as Claude Code connect to
+    <code>https://{host}/mcp</code>, and your agent can then work with workspaces,
+    ingest, search, ready-made questions and provenance on your behalf.</p></details>
+    <details><summary>How does my agent sign in?</summary><p>With a personal access token
+    sent as an <code>Authorization: Bearer</code> header, or through the Globus, ORCID or
+    GitHub login tools, which hand you a browser link. Every call runs as you.</p></details>
+    <details><summary>Who can see my data?</summary><p>Private spaces are visible to their
+    members only. Public spaces are readable by anyone, including unauthenticated clients.
+    Ready-made questions currently need an Admin role.</p></details>
+    <details><summary>How do I ingest a large file?</summary><p>Stream it to
+    <code>/upload</code> as shown above. The server answers <code>202</code> with an
+    <code>upload_id</code> and ingests in the background, and your agent can follow the
+    job from there. Up to 5&nbsp;GB per file.</p></details>
+    <details><summary>Why does /mcp say "Not Acceptable" in a browser?</summary><p>That is
+    the endpoint working correctly: a browser GET sends no
+    <code>Accept: text/event-stream</code>, so the server refuses it. Use an MCP client.</p></details>
+  </div>
+</section>
+
+<section class="cta">
+  <div><h2>Put the knowledge graph in your agent's hands.</h2>
+  <p>Register the server, sign in, and start asking.</p></div>
+  <a class="btn primary" href="#connect">Connect your agent</a>
+</section>
+</main>
+
+<footer>
+  <span>BrainKB · Model Context Protocol server</span>
+  <div class="footerlinks"><a href="#capabilities">Capabilities</a><a href="#questions">Questions</a><a href="#top">Back to top</a></div>
+</footer>
+</div>
+<script type="application/json" id="session-data">{session_json}</script>
+<script>{_LANDING_JS}</script>
+</body>
+</html>
 """
     return HTMLResponse(body, headers={"Cache-Control": "public, max-age=300"})
+
+
+@mcp.custom_route("/logo.png", methods=["GET"])
+async def _logo(request: Any) -> Any:
+    from starlette.responses import FileResponse, PlainTextResponse
+
+    if not os.path.isfile(_LOGO_PATH):
+        return PlainTextResponse("not found\n", status_code=404)
+    return FileResponse(_LOGO_PATH, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
