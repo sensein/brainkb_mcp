@@ -48,6 +48,12 @@ CATEGORY = register_category(
     "changes, and validation summaries. "
     "Inspect judge runs, prompts, verdicts and change records, transgenic "
     "lines and carried elements, measure lineage, and phenotype grounding. "
+    "Every query reads one named graph, given by its optional `graph` "
+    "parameter (default https://www.brainkb.org/named-entity/). When the user "
+    "means a particular space or workspace, or data ingested elsewhere, find its "
+    "graph IRI with ne_named_entity_graphs, brainkb_read_space or brainkb_list_spaces, "
+    "and pass that same `graph` to the lookup helpers and the query. "
+    "For a space with several graphs, run the query once per graph. "
     "Resolve user wording into parameter values first: ne_available_entity_types "
     "for type IRIs, ne_find_entity for normalized entity keys and IRIs, and "
     "ne_list_sources for source IRIs and DOIs. "
@@ -77,6 +83,61 @@ CATEGORY = register_category(
 
 ################################################################################
 # Optional user parameter query — result limit only
+# Helper — Which named graphs hold named-entity data?
+################################################################################
+
+register(QAQuery(
+    id="ne_named_entity_graphs",
+    category=CATEGORY,
+    question="Which named graphs contain named-entity data, and how many entities does each hold?",
+    notes=(
+        "Run this to choose the `graph` parameter of the other named-entity "
+        "queries when the data may not be in the default graph "
+        "https://www.brainkb.org/named-entity/, for example after an ingest into "
+        "a user's own space. Relevant requests include: 'Which graphs have "
+        "extracted entities?'; 'Query the entities in my lab space'; "
+        "'Where was the NER output ingested?'. "
+        "No input is required; limit defaults to 100 rows. "
+        "Returns ?graph (named-graph IRI) and ?entities (distinct ner:NamedEntity "
+        "IRIs in it), largest first. "
+        "To map a graph to a space, compare ?graph with the graphs listed by "
+        "brainkb_list_spaces or brainkb_read_space(slug); when the user names a "
+        "space, use its graph IRI from there and confirm it appears here. "
+        "Pass ?graph exactly as returned, trailing slash included. "
+        "Unlike the other queries, this one reads every graph the SPARQL endpoint "
+        "can see. An empty result means no graph contains typed named entities."
+    ),
+    example={"limit": 100},
+    sparql="""
+PREFIX ner: <https://brainkb.org/ner/>
+
+SELECT ?graph (COUNT(DISTINCT ?e) AS ?entities)
+WHERE {
+  GRAPH ?graph {
+    ?e a ner:NamedEntity .
+  }
+}
+GROUP BY ?graph
+ORDER BY DESC(?entities) ?graph
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of graph rows to return.",
+            default=100,
+            minimum=1,
+        ),
+    ),
+))
+
+################################################################################
+# End helper — named-entity graphs
+################################################################################
+
+################################################################################
+# Optional user parameter query — result limit only
 # Helper — Which entity types are available?
 ################################################################################
 
@@ -99,7 +160,7 @@ register(QAQuery(
         "Excludes the generic ner:NamedEntity class. Counts use asserted types "
         "only, without subclass expansion, so a parent class may show fewer "
         "entities than its subclasses combined. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no typed named entities are loaded."
     ),
     example={"limit": 1000},
@@ -108,7 +169,7 @@ PREFIX ner: <https://brainkb.org/ner/>
 
 SELECT ?type ?typeName (COUNT(DISTINCT ?e) AS ?entities)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity ;
        a ?type .
 
@@ -130,6 +191,13 @@ LIMIT {{limit}}
             "Maximum number of entity-type rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -165,7 +233,7 @@ register(QAQuery(
         "Separate entity IRIs can share a key; equal labels or keys do not "
         "establish identity. Use ?e with ne_node_neighborhood when the IRI matters. "
         "Short names can match many entities; limit defaults to 100 rows. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no entity key, label, or surface form contains the text."
     ),
     example={"name": "hippocampus", "limit": 100},
@@ -180,7 +248,7 @@ SELECT ?e ?key
 WHERE {
   VALUES ?requestedName { {{name}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity ;
        ner:normalizedEntityKey ?key .
 
@@ -221,6 +289,13 @@ LIMIT {{limit}}
             default=100,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -253,7 +328,7 @@ register(QAQuery(
         "mention document versions; they may include documents other than papers. "
         "A source with several dates or titles produces several rows. "
         "Limit defaults to 1000 rows. The query is scoped to "
-        "https://www.brainkb.org/named-entity/. An empty result means no "
+        "the named graph given by `graph`. An empty result means no "
         "source matches the search text."
     ),
     example={"search": "", "limit": 1000},
@@ -267,7 +342,7 @@ SELECT DISTINCT ?pub ?doi ?title ?date
 WHERE {
   VALUES ?requestedText { {{search}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     {
       { ?e a ner:NamedEntity ; prov:hadPrimarySource ?pub }
       UNION
@@ -302,6 +377,13 @@ LIMIT {{limit}}
             "Maximum number of source rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -343,8 +425,8 @@ register(QAQuery(
         "these are not duplicate entities. Sources without DOIs remain visible. "
         "Matches the selected rdf:type without explicit subclass expansion. "
         "Source provenance indicates occurrence, not support for a specific claim. "
-        "The query is scoped to the named graph "
-        "https://www.brainkb.org/named-entity/. Selected papers require an "
+        "The query is scoped to "
+        "the named graph given by `graph`. Selected papers require an "
         "additional source filter. An empty result means no entities match "
         "the required type, label, and source-provenance patterns."
     ),
@@ -355,7 +437,7 @@ PREFIX prov: <http://www.w3.org/ns/prov#>
 
 SELECT DISTINCT ?e ?pub ?label ?doi
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity ;
        a {{entity_type}} ;
        ner:normalizedEntityLabel ?label ;
@@ -371,6 +453,13 @@ ORDER BY ?label ?e ?pub
             "entity_type",
             "iri",
             "Required class IRI selected from ne_available_entity_types.",
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -411,7 +500,7 @@ register(QAQuery(
         "Surface forms reflect extracted wording, not independently verified "
         "synonyms. Matching a normalized key does not disambiguate separate "
         "entity IRIs that share that key; use an entity-IRI filter when needed. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no mention records match the supplied key "
         "and required source-document links."
     ),
@@ -423,7 +512,7 @@ SELECT DISTINCT ?pub ?key ?surface ?doi
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:normalizedEntityKey ?key ;
        ner:hasMention ?m .
 
@@ -443,6 +532,13 @@ ORDER BY ?key ?surface ?pub
             "string",
             "Optional exact normalized entity key; omit or use an empty string for all keys.",
             default="",
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -483,8 +579,8 @@ register(QAQuery(
         "surface forms are identical. "
         "The query retrieves stored grounding information; it does not "
         "independently verify that the offsets match the source text. "
-        "The query covers all sources in the named graph "
-        "https://www.brainkb.org/named-entity/. Requests about a specific "
+        "The query covers all sources in "
+        "the named graph given by `graph`. Requests about a specific "
         "entity, mention, or document require additional filters. "
         "An empty result means no mentions match all required grounding "
         "patterns, not necessarily that no entities were extracted."
@@ -495,7 +591,7 @@ PREFIX ner: <https://brainkb.org/ner/>
 
 SELECT DISTINCT ?m ?pub ?surface ?start ?end ?doi
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?m a ner:EntityMention ;
        ner:surfaceForm ?surface ;
        ner:documentStartOffset ?start ;
@@ -507,7 +603,15 @@ WHERE {
 }
 ORDER BY ?pub ?start ?end ?m
 """,
-    params=(),
+    params=(
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
+    ),
 ))
 
 ################################################################################
@@ -546,7 +650,7 @@ register(QAQuery(
         "Types belong to shared entity nodes and may aggregate assignments "
         "across sources; they are not necessarily source-specific typings. "
         "Returns all qualifying rows without a query-level row limit. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "Selecting a particular source without a DOI requires an additional "
         "source-IRI filter. An empty result means no records match the "
         "filter and required entity-key, type, and source-provenance patterns."
@@ -560,7 +664,7 @@ SELECT DISTINCT ?pub ?doi ?e ?key ?cls
 WHERE {
   VALUES ?requestedDoi { {{doi}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e prov:hadPrimarySource ?pub ;
        ner:normalizedEntityKey ?key ;
        a ?cls .
@@ -586,6 +690,13 @@ ORDER BY ?cls ?key ?e ?pub
             "string",
             "Optional exact paper DOI; omit or use an empty string for all sources.",
             default="",
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -627,8 +738,8 @@ register(QAQuery(
         "prove correct entity resolution, consistent meaning, or agreement "
         "between scientific entity claims. Separate IRIs representing the same "
         "real-world entity are not merged. "
-        "The query is scoped to the named graph "
-        "https://www.brainkb.org/named-entity/. A specific entity or selected "
+        "The query is scoped to "
+        "the named graph given by `graph`. A specific entity or selected "
         "set of papers requires additional filters. "
         "An empty result means no entity has qualifying mention records in "
         "at least two sources."
@@ -643,7 +754,7 @@ SELECT ?entity ?key
        (GROUP_CONCAT(DISTINCT ?surface; separator=" | ") AS ?wording)
        (GROUP_CONCAT(DISTINCT ?sourceId; separator=" | ") AS ?sources)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?entity a ner:NamedEntity ;
             ner:normalizedEntityKey ?key ;
             ner:hasMention ?mention .
@@ -659,7 +770,15 @@ GROUP BY ?entity ?key
 HAVING(COUNT(DISTINCT ?source) > 1)
 ORDER BY DESC(?papers) ?key ?entity
 """,
-            params=(),
+    params=(
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
+    ),
 ))
 
 ################################################################################
@@ -703,7 +822,7 @@ register(QAQuery(
         "Selecting a reference source without a DOI requires an additional "
         "source-IRI filter. "
         "Returns all qualifying rows without a query-level row limit. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no source pairs match the filter and share "
         "an entity through the recorded source-provenance links."
     ),
@@ -717,7 +836,7 @@ SELECT ?p1 ?p2 ?doi ?otherDoi
 WHERE {
   VALUES ?requestedDoi { {{doi}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity ;
        prov:hadPrimarySource ?p1, ?p2 .
 
@@ -741,6 +860,13 @@ ORDER BY DESC(?shared) ?p1 ?p2
             "string",
             "Optional exact reference-paper DOI; omit or use an empty string to compare all source pairs.",
             default="",
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -783,7 +909,7 @@ register(QAQuery(
         "those entities occur. It does not establish that each source "
         "independently asserted or endorsed the mapping. "
         "Sources may include documents other than papers. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no qualifying mapping target is associated "
         "with entities from at least two sources."
     ),
@@ -794,7 +920,7 @@ PREFIX prov: <http://www.w3.org/ns/prov#>
 
 SELECT ?obo (COUNT(DISTINCT ?pub) AS ?papers)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e (skos:exactMatch|skos:closeMatch|skos:broadMatch) ?obo ;
        prov:hadPrimarySource ?pub .
 
@@ -805,7 +931,15 @@ GROUP BY ?obo
 HAVING(COUNT(DISTINCT ?pub) > 1)
 ORDER BY DESC(?papers) ?obo
 """,
-    params=(),
+    params=(
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
+    ),
 ))
 
 ################################################################################
@@ -845,7 +979,7 @@ register(QAQuery(
         "Mappings are read from shared entity nodes and are not attributed "
         "to individual sources or mapping decisions by this query. "
         "The query covers all qualifying entities in "
-        "https://www.brainkb.org/named-entity/. Requests about a specific "
+        "the named graph given by `graph`. Requests about a specific "
         "entity, tier, or ontology require additional filters. "
         "An empty result means no records match the required normalized-key "
         "and external-mapping patterns."
@@ -865,7 +999,7 @@ WHERE {
     (skos:relatedMatch "related")
   }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:normalizedEntityKey ?key ;
        ?p ?obo .
 
@@ -874,7 +1008,15 @@ WHERE {
 }
 ORDER BY ?key ?e ?tier ?obo
 """,
-    params=(),
+    params=(
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
+    ),
 ))
 
 ################################################################################
@@ -914,7 +1056,7 @@ register(QAQuery(
         "Excludes the generic ner:NamedEntity class. Multiple classes or "
         "comments can produce multiple rows for one entity; the limit "
         "applies to rows, not distinct entities. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no entities match these coverage-gap patterns."
     ),
     example={"limit": 1000},
@@ -924,7 +1066,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?e ?cls ?key ?gap
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity ;
        ner:normalizedEntityKey ?key ;
        a ?cls .
@@ -940,7 +1082,7 @@ WHERE {
   MINUS {
     SELECT DISTINCT ?e
     WHERE {
-      GRAPH <https://www.brainkb.org/named-entity/> {
+      GRAPH {{graph}} {
         ?e ner:resolvedToConcept ?c .
 
         ?c ner:conceptInOntologyVersion/
@@ -962,6 +1104,13 @@ LIMIT {{limit}}
             "Maximum number of result rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -997,7 +1146,7 @@ register(QAQuery(
         "The distribution can identify alignment patterns worth reviewing, "
         "but does not independently establish ontology granularity or "
         "mapping quality. Mapping tiers are relationships, not confidence scores. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "The limit applies to aggregated ontology-tier rows after counting. "
         "Absent ontology-tier combinations are omitted rather than shown "
         "with zero counts. An empty result means no mappings match the "
@@ -1013,7 +1162,7 @@ WHERE {
   {
     SELECT DISTINCT ?e ?term ?acr ?tier
     WHERE {
-      GRAPH <https://www.brainkb.org/named-entity/> {
+      GRAPH {{graph}} {
         {
           { ?e skos:exactMatch ?term . BIND("exact" AS ?tier) }
           UNION
@@ -1032,7 +1181,7 @@ WHERE {
       {
         SELECT DISTINCT ?term ?acr
         WHERE {
-          GRAPH <https://www.brainkb.org/named-entity/> {
+          GRAPH {{graph}} {
             ?concept ner:conceptIRI ?iri ;
                      ner:conceptInOntologyVersion/
                      ner:versionOfOntology/
@@ -1057,6 +1206,13 @@ LIMIT {{limit}}
             "Maximum number of aggregated ontology-tier rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1097,7 +1253,7 @@ register(QAQuery(
         "rows because claim IRIs and source provenance are not selected. "
         "Matching a normalized key does not disambiguate separate entity "
         "IRIs sharing that key. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "Requests restricted to one role or flag require additional filters. "
         "An empty result means no claims match the filter and required "
         "patterns; it does not establish that no causal relationship exists."
@@ -1110,7 +1266,7 @@ SELECT ?key ?role ?causeKey ?effectKey ?negated ?hypothetical
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?x ner:normalizedEntityKey ?key .
 
     ?rel ner:hasCause ?c ;
@@ -1150,6 +1306,13 @@ LIMIT {{limit}}
             "Maximum number of entity-role claim rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1192,7 +1355,7 @@ register(QAQuery(
         "do not interpret every returned step as an established causal fact. "
         "The limit applies to step rows, not complete chains, and can "
         "truncate a chain. The query covers all recorded chains in "
-        "https://www.brainkb.org/named-entity/. "
+        "the named graph given by `graph`. "
         "A specific chain requires an additional chain-IRI filter. "
         "An empty result means no records match the required chain "
         "membership and cause/effect patterns."
@@ -1206,7 +1369,7 @@ SELECT ?chain ?chainLabel ?rel
        (COUNT(DISTINCT ?prior) AS ?position)
        ?causeKey ?effectKey
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?chain a ner:CausalChain ;
            ner:hasChainRelation ?rel .
 
@@ -1233,6 +1396,13 @@ LIMIT {{limit}}
             "Maximum number of chain-step rows to return; may truncate a chain.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1278,7 +1448,7 @@ register(QAQuery(
         "Negation and hypotheticality flags are not selected; a returned "
         "estimate alone does not establish an affirmative causal finding. "
         "The query covers all qualifying estimates in "
-        "https://www.brainkb.org/named-entity/. Requests about a specific "
+        "the named graph given by `graph`. Requests about a specific "
         "entity, source, measure, or significance threshold require "
         "additional filters. "
         "The limit applies to result rows, not distinct claims or studies. "
@@ -1291,7 +1461,7 @@ PREFIX ner: <https://brainkb.org/ner/>
 
 SELECT ?causeKey ?effectKey ?measure ?value ?p ?n
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
          ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
          ner:hasCurrentCausalRelationVersion ?v .
@@ -1315,6 +1485,13 @@ LIMIT {{limit}}
             "Maximum number of quantitative-evidence rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1355,7 +1532,7 @@ register(QAQuery(
         "earliest paper; retrieving that paper requires an additional query. "
         "Sources may include documents other than papers. "
         "The query covers all qualifying entities in "
-        "https://www.brainkb.org/named-entity/. "
+        "the named graph given by `graph`. "
         "A specific entity or date range requires additional filters. "
         "An empty result means no entities have source-provenance links "
         "to documents with usable years."
@@ -1371,7 +1548,7 @@ SELECT ?e ?key
        (MIN(?year) AS ?first)
        (COUNT(DISTINCT ?pub) AS ?papers)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:normalizedEntityKey ?key ;
        prov:hadPrimarySource ?pub .
 
@@ -1392,6 +1569,13 @@ LIMIT {{limit}}
             "Maximum number of entity-level result rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1433,7 +1617,7 @@ register(QAQuery(
         "not reconstruct changes to a claim over time. "
         "Multiple dates or separate claims can produce multiple rows. "
         "Identical displayed rows do not necessarily represent duplicate claims. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no records match the required claim, "
         "entity-key, hypotheticality, and source-date patterns."
     ),
@@ -1448,7 +1632,7 @@ SELECT ?pub ?effectKey ?year ?doi ?causeKey ?hypothetical
 WHERE {
   VALUES ?requestedKey { {{effect_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?rel ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
          ner:hasCause ?c ;
          ner:hasCurrentCausalRelationVersion/
@@ -1481,6 +1665,13 @@ LIMIT {{limit}}
             "Maximum number of claim-source-year rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1521,7 +1712,7 @@ register(QAQuery(
         "Results are ordered by claim IRI and revision number. "
         "The limit applies to result rows and may truncate a claim's history. "
         "The query covers all qualifying versions in "
-        "https://www.brainkb.org/named-entity/. "
+        "the named graph given by `graph`. "
         "A specific claim requires an additional claim-IRI filter. "
         "An empty result means no version records match the required "
         "type, parent-claim, and revision-number patterns."
@@ -1532,7 +1723,7 @@ PREFIX ner: <https://brainkb.org/ner/>
 
 SELECT ?rel ?rev ?from ?until
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?v a ner:CausalRelationVersion ;
        ner:versionOfCausalRelation ?rel ;
        ner:relationRevisionNumber ?rev .
@@ -1551,6 +1742,13 @@ LIMIT {{limit}}
             "Maximum number of claim-version interval rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1586,7 +1784,7 @@ register(QAQuery(
         "in different years is counted in each. Years with no sources are "
         "omitted rather than shown as zero. Entity provenance shows where the "
         "entity occurs, not that the source asserted the mapping. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no dated source has an entity mapped to the term."
     ),
     example={"term_iri": "", "limit": 1000},
@@ -1601,7 +1799,7 @@ SELECT ?term ?year (COUNT(DISTINCT ?pub) AS ?papers)
 WHERE {
   VALUES ?requestedTerm { {{term_iri}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e (skos:exactMatch|skos:closeMatch) ?term ;
        prov:hadPrimarySource ?pub .
 
@@ -1630,6 +1828,13 @@ LIMIT {{limit}}
             "Maximum number of term-year rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1662,7 +1867,7 @@ register(QAQuery(
         "export did not record them, not that the run had none. "
         "To see which run produced a particular mention, use "
         "ne_entity_provenance_walk. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no extraction-activity records are loaded; "
         "compact exports may omit them."
     ),
@@ -1673,7 +1878,7 @@ PREFIX prov: <http://www.w3.org/ns/prov#>
 
 SELECT DISTINCT ?run ?runId ?agent ?agentVersion ?started ?ended ?cfg ?hash
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?run a ner:NERExtractionActivity ;
          ner:runIdentifier ?runId .
 
@@ -1700,6 +1905,13 @@ LIMIT {{limit}}
             "Maximum number of run rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1733,7 +1945,7 @@ register(QAQuery(
         "exports), ?runId and ?agentLabel stay blank: a run that merely processed "
         "the same document is not evidence that it extracted this mention. "
         "Separate IRIs sharing a key are all returned; compare ?e values. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no mentions with document links match the key."
     ),
     example={"entity_key": "hippocampus", "limit": 1000},
@@ -1746,7 +1958,7 @@ SELECT DISTINCT ?e ?key ?m ?surface ?dv ?pub ?doi ?runId ?agentLabel
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:normalizedEntityKey ?key ;
        ner:hasMention ?m .
 
@@ -1783,6 +1995,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -1815,7 +2034,7 @@ register(QAQuery(
         "Requires full-profile audit records; compact exports omit "
         "classifications, so an empty result usually means those records "
         "are absent, not that confidence was zero. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"entity_key": "", "limit": 1000},
     sparql="""
@@ -1825,7 +2044,7 @@ SELECT DISTINCT ?m ?key ?surface ?confidence
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?m a ner:EntityMention ;
        ner:surfaceForm ?surface ;
        ner:hasCurrentAnnotationVersion/
@@ -1853,6 +2072,13 @@ LIMIT {{limit}}
             "Maximum number of mention rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -1889,7 +2115,7 @@ register(QAQuery(
         "ne_entity_review_verdicts. "
         "Requires full-profile audit records; compact exports omit reviews, so "
         "an empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"entity_key": "", "dimension": "", "limit": 1000},
     sparql="""
@@ -1900,7 +2126,7 @@ SELECT DISTINCT ?m ?key ?surface ?dimension ?status ?conf ?agentVersion
 WHERE {
   VALUES (?requestedKey ?requestedDimension) { ({{entity_key}} {{dimension}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?m ner:surfaceForm ?surface ;
        ner:hasCurrentAnnotationVersion/ner:hasReviewDecision ?rd .
 
@@ -1940,6 +2166,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -1972,7 +2205,7 @@ register(QAQuery(
         "shared entity is counted only in sources where it has a mention. "
         "Counts reflect extraction output, not document length or importance; "
         "compare densities with care. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no mentions link to a matching source."
     ),
     example={"doi": "", "limit": 1000},
@@ -1985,7 +2218,7 @@ SELECT ?pub ?doi
 WHERE {
   VALUES ?requestedDoi { {{doi}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity ;
        ner:hasMention ?m .
 
@@ -2016,6 +2249,13 @@ LIMIT {{limit}}
             "Maximum number of source rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -2054,7 +2294,7 @@ register(QAQuery(
         "sources and cannot show which source stated a relationship or whether "
         "it was negated; use the RelationAssertion queries (e.g. "
         "ne_cell_type_region_assertions) for source-level evidence. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no entity has that exact key."
     ),
     example={"entity_key": "hippocampus", "limit": 500},
@@ -2065,7 +2305,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?x ?key ?direction ?predicate ?other ?otherKey ?otherLabel
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?x ner:normalizedEntityKey {{entity_key}} .
     BIND({{entity_key}} AS ?key)
 
@@ -2097,6 +2337,13 @@ LIMIT {{limit}}
             "Maximum number of neighbor rows to return.",
             default=500,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -2132,7 +2379,7 @@ register(QAQuery(
         "Mapping predicates (skos:exactMatch, closeMatch, broadMatch, ...) are "
         "tiers, not all identity claims. Direct edges aggregate across sources "
         "and carry no negation or source attribution. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means nothing in that graph links to or from the IRI."
     ),
     example={"node_iri": "http://purl.obolibrary.org/obo/UBERON_0001954", "limit": 500},
@@ -2143,7 +2390,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?direction ?predicate ?other ?otherKey ?otherLabel
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     {
       { {{node_iri}} ?predicate ?other . BIND("out" AS ?direction) }
       UNION
@@ -2172,6 +2419,13 @@ LIMIT {{limit}}
             "Maximum number of neighbor rows to return.",
             default=500,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -2208,7 +2462,7 @@ register(QAQuery(
         "Cell types cover ner:CellType and all its subclasses in ontology 2.5.0. "
         "Direct located-in edges without assertion records are not returned; "
         "missing assertion evidence cannot be reconstructed from a direct edge. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching assertions, not that the cell is "
         "absent from the region."
     ),
@@ -2222,7 +2476,7 @@ SELECT DISTINCT ?cell ?region ?pub ?doi ?negated ?modality ?context ?evidence
 WHERE {
   VALUES (?requestedCell ?requestedRegion) { ({{cell_key}} {{region_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:CellType in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?cellClass {
       ner:Astrocyte ner:CellSubtype ner:CellType ner:EpendymalCell ner:ExcitatoryNeuron
@@ -2275,6 +2529,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2306,7 +2567,7 @@ register(QAQuery(
         "produces several rows. Direct edges aggregate across sources and "
         "carry no source attribution or negation. Applies to any entity with "
         "part-of edges, not only brain regions. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching part-of edges were materialized."
     ),
     example={"part_key": "", "whole_key": "hippocampus", "limit": 1000},
@@ -2318,7 +2579,7 @@ SELECT DISTINCT ?part ?whole ?partTerm ?wholeTerm
 WHERE {
   VALUES (?requestedPart ?requestedWhole) { ({{part_key}} {{whole_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?p obo:BFO_0000050 ?w ;
        ner:normalizedEntityKey ?part .
 
@@ -2354,6 +2615,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2385,7 +2653,7 @@ register(QAQuery(
         "source, which does not by itself prove it was the studied organism "
         "rather than, say, one cited from other work. An entity with several "
         "organism classes produces several rows. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no organism entities match."
     ),
     example={"doi": "", "limit": 1000},
@@ -2397,7 +2665,7 @@ SELECT DISTINCT ?pub ?doi ?kind ?key
 WHERE {
   VALUES ?requestedDoi { {{doi}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:OrganismEntity in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?kind {
       ner:DevelopmentalStage ner:Genotype ner:LifeStage ner:Organism ner:Species
@@ -2433,6 +2701,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2465,7 +2740,7 @@ register(QAQuery(
         "indicator, effector or regulatory element. An element with several "
         "classes produces several rows. Direct edges aggregate across sources "
         "and carry no source attribution or negation. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching edges were materialized."
     ),
     example={"line_key": "", "carries_key": "", "limit": 1000},
@@ -2477,7 +2752,7 @@ SELECT DISTINCT ?line ?carries ?carriesClass
 WHERE {
   VALUES (?requestedLine ?requestedCarries) { ({{line_key}} {{carries_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     VALUES ?lineClass { ner:Genotype ner:Strain ner:CellLine }
 
     ?l a ?lineClass ;
@@ -2519,6 +2794,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2551,7 +2833,7 @@ register(QAQuery(
         "participant (reagent, subject, target) is not recorded by this edge. "
         "For chemicals in assays with their broader classes, use "
         "ne_assay_chemical_participants. Direct edges aggregate across sources. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching edges were materialized."
     ),
     example={"method_key": "", "participant_key": "", "limit": 1000},
@@ -2563,7 +2845,7 @@ SELECT DISTINCT ?method ?participant
 WHERE {
   VALUES (?requestedMethod ?requestedParticipant) { ({{method_key}} {{participant_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:Method, ner:ImagingModality, ner:ElectrophysiologyModality, ner:Intervention in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?methodClass {
       ner:Assay ner:ComputationalMethod ner:ElectrophysiologyModality
@@ -2606,6 +2888,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2639,7 +2928,7 @@ register(QAQuery(
         "broader parents are shown. Chemicals with several parents produce "
         "several rows. Direct edges aggregate across sources. "
         "For participants of all method types, use ne_method_participants. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching edges were materialized."
     ),
     example={"assay_key": "", "chemical_key": "", "limit": 1000},
@@ -2652,7 +2941,7 @@ SELECT DISTINCT ?assay ?stimulus ?class
 WHERE {
   VALUES (?requestedAssay ?requestedChemical) { ({{assay_key}} {{chemical_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:Assay in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?assayClass {
       ner:Assay
@@ -2700,6 +2989,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2733,7 +3029,7 @@ register(QAQuery(
         "claims, filter returned rows where ?basis is not 'intervention'. "
         "A claim with several bases produces several rows. Negated claims state "
         "the absence of an effect; report them as such. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching causal claims are recorded."
     ),
     example={"cause_key": "", "effect_key": "", "limit": 1000},
@@ -2745,7 +3041,7 @@ SELECT DISTINCT ?rel ?causeKey ?effectKey ?hypothetical ?negated ?basis ?evidenc
 WHERE {
   VALUES (?requestedCause ?requestedEffect) { ({{cause_key}} {{effect_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
          ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
          ner:hasCurrentCausalRelationVersion ?v .
@@ -2786,6 +3082,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2820,7 +3123,7 @@ register(QAQuery(
         "here and still need review. Negation and hypotheticality are not "
         "selected; check them with ne_entity_causal_claims before reporting a "
         "significant estimate as an affirmative finding. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching estimate has a recorded p < 0.05."
     ),
     example={"cause_key": "", "effect_key": "", "limit": 1000},
@@ -2831,7 +3134,7 @@ SELECT ?causeKey ?effectKey ?measure ?value ?p ?n
 WHERE {
   VALUES (?requestedCause ?requestedEffect) { ({{cause_key}} {{effect_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
          ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
          ner:hasCurrentCausalRelationVersion/ner:hasEffectEstimate ?est .
@@ -2871,6 +3174,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2900,7 +3210,7 @@ register(QAQuery(
         "returned; nothing is inferred from chains or co-occurrence. Negation, "
         "hypotheticality and source are not selected; use "
         "ne_entity_causal_claims for those flags. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching third variables were recorded."
     ),
     example={"cause_key": "", "effect_key": "", "role": "", "limit": 1000},
@@ -2913,7 +3223,7 @@ WHERE {
     ({{cause_key}} {{effect_key}} {{role}})
   }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
          ner:hasEffect/ner:normalizedEntityKey ?effectKey .
 
@@ -2961,6 +3271,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -2990,7 +3307,7 @@ register(QAQuery(
         "equivalence or any specific relationship by itself. Only references "
         "to named entities are returned. Entities with several resolved "
         "concepts produce several rows. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching cross-references were materialized."
     ),
     example={"entity_key": "", "limit": 1000},
@@ -3002,7 +3319,7 @@ SELECT DISTINCT ?a ?aTerm ?b ?bTerm
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?x rdfs:seeAlso ?y ;
        ner:normalizedEntityKey ?a .
 
@@ -3036,6 +3353,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3066,7 +3390,7 @@ register(QAQuery(
         "Measures cover ner:Measurement and its subclasses in ontology 2.5.0 "
         "(electrophysiological, imaging, molecular). Only ancestors with a "
         "normalized key are shown. Direct edges aggregate across sources. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no lineage was recorded for matching measures."
     ),
     example={"measure_key": "", "limit": 1000},
@@ -3078,7 +3402,7 @@ SELECT DISTINCT ?measure ?derivedFrom
 WHERE {
   VALUES ?requestedMeasure { {{measure_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:Measurement in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?measureClass {
       ner:ElectrophysiologicalMeasurement ner:ImagingMeasurement ner:Measurement
@@ -3111,6 +3435,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3140,7 +3471,7 @@ register(QAQuery(
         "configuration artifacts are excluded because those lack entity keys. "
         "A used entity with several classes produces several rows. Direct "
         "edges aggregate across sources and carry no source attribution. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching prov:used edges were materialized."
     ),
     example={"entity_key": "", "limit": 1000},
@@ -3152,7 +3483,7 @@ SELECT DISTINCT ?user ?uses ?usesClass
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?u prov:used ?x ;
        ner:normalizedEntityKey ?user .
 
@@ -3188,6 +3519,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3218,7 +3556,7 @@ register(QAQuery(
         "ancestors, use ne_broader_paths_to_ancestors. Broader edges come from "
         "the extracted text, not from the external ontology hierarchy, and "
         "aggregate across sources. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching broader edges were materialized."
     ),
     example={"child_key": "", "parent_key": "", "limit": 1000},
@@ -3230,7 +3568,7 @@ SELECT DISTINCT ?child ?parent ?parentTerm
 WHERE {
   VALUES (?requestedChild ?requestedParent) { ({{child_key}} {{parent_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?c skos:broader ?p ;
        ner:normalizedEntityKey ?child .
 
@@ -3265,6 +3603,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3295,7 +3640,7 @@ register(QAQuery(
         "checked, so results are curation candidates, not proof of a gap. "
         "Entities with several classes appear once per class with the same "
         "count; the limit applies to rows. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means every mentioned entity has an external mapping."
     ),
     example={"limit": 1000},
@@ -3304,7 +3649,7 @@ PREFIX ner: <https://brainkb.org/ner/>
 
 SELECT ?e ?cls ?key (COUNT(DISTINCT ?m) AS ?mentions)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e a ner:NamedEntity , ?cls ;
        ner:normalizedEntityKey ?key ;
        ner:hasMention ?m .
@@ -3318,7 +3663,7 @@ WHERE {
   MINUS {
     SELECT DISTINCT ?e
     WHERE {
-      GRAPH <https://www.brainkb.org/named-entity/> {
+      GRAPH {{graph}} {
         ?e ner:resolvedToConcept ?c .
 
         ?c ner:conceptInOntologyVersion/
@@ -3341,6 +3686,13 @@ LIMIT {{limit}}
             "Maximum number of entity-class rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -3377,7 +3729,7 @@ register(QAQuery(
         "polarity. The same pair can appear in separate rows with opposite "
         "polarity or negation; that is a candidate for review, not proof of "
         "disagreement. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching combination recurs across sources."
     ),
     example={"cause_key": "", "effect_key": "", "limit": 1000},
@@ -3391,7 +3743,7 @@ SELECT ?causeKey ?effectKey ?polarity ?negated
 WHERE {
   VALUES (?requestedCause ?requestedEffect) { ({{cause_key}} {{effect_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?rel ner:hasCause/ner:normalizedEntityKey ?causeKey ;
          ner:hasEffect/ner:normalizedEntityKey ?effectKey ;
          prov:hadPrimarySource ?pub ;
@@ -3431,6 +3783,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3459,7 +3818,7 @@ register(QAQuery(
         "participant (RO:0000057), is covered by ne_method_participants and "
         "ne_line_carried_elements. Direct edges aggregate across sources and "
         "carry no source attribution or negation. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching edges were materialized."
     ),
     example={"entity_key": "", "process_key": "", "limit": 1000},
@@ -3471,7 +3830,7 @@ SELECT DISTINCT ?entity ?process
 WHERE {
   VALUES (?requestedEntity ?requestedProcess) { ({{entity_key}} {{process_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e obo:RO_0000056 ?p ;
        ner:normalizedEntityKey ?entity .
 
@@ -3504,6 +3863,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3534,7 +3900,7 @@ register(QAQuery(
         "agents or prompts produces several rows. "
         "Requires full-profile audit records; compact exports omit them, so an "
         "empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"limit": 1000},
     sparql="""
@@ -3544,7 +3910,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?judge ?model ?prompt ?hash ?mode
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?act a ner:AutomaticValidationActivity ;
          rdfs:label ?judge ;
          prov:wasAssociatedWith ?ag .
@@ -3570,6 +3936,13 @@ LIMIT {{limit}}
             "Maximum number of judge rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -3601,7 +3974,7 @@ register(QAQuery(
         "judge's own score, not a validated probability. "
         "Requires full-profile audit records; compact exports omit reviews, so "
         "an empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"entity_key": "", "dimension": "", "limit": 1000},
     sparql="""
@@ -3611,7 +3984,7 @@ SELECT DISTINCT ?key ?dimension ?status ?conf ?reason
 WHERE {
   VALUES (?requestedKey ?requestedDimension) { ({{entity_key}} {{dimension}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:normalizedEntityKey ?key ;
        ner:hasReviewDecision ?r .
 
@@ -3647,6 +4020,13 @@ LIMIT {{limit}}
             "Maximum number of verdict rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -3684,7 +4064,7 @@ register(QAQuery(
         "entity_key filter, records without a changed entity are excluded. "
         "Requires full-profile audit records; compact exports omit changes, so "
         "an empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"entity_key": "", "change_kind": "", "limit": 1000},
     sparql="""
@@ -3696,7 +4076,7 @@ SELECT DISTINCT ?kind ?key ?field ?old ?new ?reason ?licensedBy
 WHERE {
   VALUES (?requestedKey ?requestedKind) { ({{entity_key}} {{change_kind}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:ChangeRecord in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?kind {
       ner:CanonicalFormChangedChange ner:CausalConfidenceChangedChange
@@ -3751,6 +4131,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -3782,7 +4169,7 @@ register(QAQuery(
         "For all change types, use ne_judge_change_records. "
         "Requires full-profile audit records; compact exports omit changes, so "
         "an empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"entity_key": "", "limit": 1000},
     sparql="""
@@ -3792,7 +4179,7 @@ SELECT DISTINCT ?key ?removedIri ?reason
 WHERE {
   VALUES ?requestedKey { {{entity_key}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?cr a ner:MappingRemovedChange ;
         (ner:changedEntity|^ner:hasChangeRecord)/ner:normalizedEntityKey ?key ;
         ner:oldLiteralValue ?removedIri ;
@@ -3817,6 +4204,13 @@ LIMIT {{limit}}
             "Maximum number of rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -3847,7 +4241,7 @@ register(QAQuery(
         "Counts are decisions, not distinct entities or ontology terms. "
         "Requires full-profile mapping-decision records; compact exports omit "
         "them, so an empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"limit": 1000},
     sparql="""
@@ -3857,7 +4251,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT ?source ?method (COUNT(DISTINCT ?dec) AS ?decisions)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?dec a ner:ConceptMappingDecision ;
          ner:mappingStatus <https://brainkb.org/ner/mapping-status/accepted> ;
          prov:wasGeneratedBy ?act .
@@ -3881,6 +4275,13 @@ LIMIT {{limit}}
             "Maximum number of source-method rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -3910,7 +4311,7 @@ register(QAQuery(
         "several rows. "
         "Requires full-profile validation reports; compact exports omit them, "
         "so an empty result usually means those records are absent. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"limit": 1000},
     sparql="""
@@ -3920,7 +4321,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?snapshot ?label ?summary ?generated
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?snapshot a ner:ExtractionSnapshot ;
               ner:hasValidationReport ?report .
 
@@ -3939,6 +4340,13 @@ LIMIT {{limit}}
             "Maximum number of snapshot rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -3972,7 +4380,7 @@ register(QAQuery(
         "are not returned. Tiers are mapping relationships, not confidence "
         "scores, and not all are identity claims. A concept recorded under "
         "several ontology versions is returned once. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no entity maps to that ontology at that tier."
     ),
     example={"ontology_acronym": "UBERON", "tier": "", "limit": 1000},
@@ -3985,7 +4393,7 @@ SELECT DISTINCT ?e ?key ?acronym ?curie ?conceptLabel ?tier
 WHERE {
   VALUES (?requestedOntology ?requestedTier) { ({{ontology_acronym}} {{tier}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     {
       SELECT DISTINCT ?e ?term ?tier
       WHERE {
@@ -4043,6 +4451,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4075,7 +4490,7 @@ register(QAQuery(
         "BRAINKB concepts unless filtered. Source counts come from entity "
         "provenance: they show where the entities occur, not that each source "
         "endorsed the mapping. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no entity resolves to a concept in that ontology."
     ),
     example={"ontology_acronym": "UBERON", "limit": 1000},
@@ -4089,7 +4504,7 @@ SELECT ?acronym ?conceptType
 WHERE {
   VALUES ?requestedOntology { {{ontology_acronym}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:normalizedEntityKey ?key ;
        ner:resolvedToConcept ?c ;
        prov:hadPrimarySource ?pub .
@@ -4120,6 +4535,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4149,7 +4571,7 @@ register(QAQuery(
         "as unresolved external coverage. An entity resolved to concepts in "
         "several ontologies is counted in each, so entity counts do not sum to "
         "the number of entities. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no resolved concepts carry ontology metadata."
     ),
     example={"limit": 1000},
@@ -4160,7 +4582,7 @@ SELECT ?acronym
        (COUNT(DISTINCT ?e) AS ?entities)
        (COUNT(DISTINCT ?c) AS ?concepts)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?e ner:resolvedToConcept ?c .
 
     ?c ner:conceptInOntologyVersion/
@@ -4179,6 +4601,13 @@ LIMIT {{limit}}
             "Maximum number of ontology rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
@@ -4214,7 +4643,7 @@ register(QAQuery(
         "subclasses. Source is entity provenance (where the phenotype occurs), "
         "not evidence for a phenotype association; use ne_phenotype_assertions "
         "for bearer–phenotype claims. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no phenotype entities match."
     ),
     example={"level": "", "limit": 1000},
@@ -4226,7 +4655,7 @@ SELECT DISTINCT ?pub ?level ?key ?doi
 WHERE {
   VALUES ?requestedLevel { {{level}} }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:Phenotype in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?level {
       ner:BehavioralPhenotype ner:CellularPhenotype ner:ClinicalPhenotype
@@ -4266,6 +4695,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4298,7 +4734,7 @@ register(QAQuery(
         "report them as such. Context and modality (species, condition, "
         "hedging) restrict the claim. Direct edges without assertion records "
         "are not returned. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching assertions, not that no association exists."
     ),
     example={"bearer_key": "", "phenotype_key": "", "limit": 1000},
@@ -4311,7 +4747,7 @@ SELECT DISTINCT ?bearer ?phenotype ?pub ?doi ?evidence ?negated ?modality ?conte
 WHERE {
   VALUES (?requestedBearer ?requestedPhenotype) { ({{bearer_key}} {{phenotype_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?assertion a ner:RelationAssertion ;
                ner:assertionSubject ?c ;
                ner:assertionPredicate obo:RO_0002200 ;
@@ -4354,6 +4790,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4383,7 +4826,7 @@ register(QAQuery(
         "Phenotypes with no HP/MP/PATO mapping are not counted here; use "
         "ne_entities_without_external_mapping for gaps. Absent vocabulary-tier "
         "combinations are omitted rather than shown as zero. "
-        "The query is scoped to https://www.brainkb.org/named-entity/."
+        "The query is scoped to the named graph given by `graph`."
     ),
     example={"limit": 1000},
     sparql="""
@@ -4392,7 +4835,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 
 SELECT ?vocab ?tier (COUNT(DISTINCT ?e) AS ?n)
 WHERE {
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:Phenotype in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?cls {
       ner:BehavioralPhenotype ner:CellularPhenotype ner:ClinicalPhenotype
@@ -4428,6 +4871,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4461,7 +4911,7 @@ register(QAQuery(
         "with ?measure unbound. Source is not selected; use "
         "ne_effect_claims_by_source_year or ne_causal_pairs_across_sources for "
         "source attribution. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching phenotype-effect claims are recorded."
     ),
     example={"cause_key": "", "phenotype_key": "", "limit": 1000},
@@ -4472,7 +4922,7 @@ SELECT DISTINCT ?causeKey ?phenotype ?negated ?hypothetical ?measure ?value
 WHERE {
   VALUES (?requestedCause ?requestedPhenotype) { ({{cause_key}} {{phenotype_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     # every subclass of ner:Phenotype in named_entity_ontology.owl 2.5.0 (generated)
     VALUES ?cls {
       ner:BehavioralPhenotype ner:CellularPhenotype ner:ClinicalPhenotype
@@ -4524,6 +4974,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4555,7 +5012,7 @@ register(QAQuery(
         "restricted to cells. Only leaves are returned as starting points; for "
         "one-step edges from any entity, use ne_broader_relationships. Path "
         "length and step order are not returned. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching broader paths were materialized."
     ),
     example={"leaf_key": "", "ancestor_key": "", "limit": 1000},
@@ -4567,7 +5024,7 @@ SELECT DISTINCT ?leaf ?ancestor ?ancestorTerm
 WHERE {
   VALUES (?requestedLeaf ?requestedAncestor) { ({{leaf_key}} {{ancestor_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?l skos:broader+ ?a ;
        ner:normalizedEntityKey ?leaf .
 
@@ -4604,6 +5061,13 @@ LIMIT {{limit}}
             default=1000,
             minimum=1,
         ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
+        ),
     ),
 ))
 
@@ -4637,7 +5101,7 @@ register(QAQuery(
         "marker is expressed in a region or species; check ?context and the "
         "evidence instead. Rows with ?negated true state the marker is NOT "
         "expressed; report them as such. "
-        "The query is scoped to https://www.brainkb.org/named-entity/. "
+        "The query is scoped to the named graph given by `graph`. "
         "An empty result means no matching assertions, not that the cell "
         "lacks the marker."
     ),
@@ -4651,7 +5115,7 @@ SELECT DISTINCT ?cell ?marker ?pub ?doi ?evidence ?negated ?modality ?context
 WHERE {
   VALUES (?requestedCell ?requestedMarker) { ({{cell_key}} {{marker_key}}) }
 
-  GRAPH <https://www.brainkb.org/named-entity/> {
+  GRAPH {{graph}} {
     ?assertion a ner:RelationAssertion ;
                ner:assertionSubject ?c ;
                ner:assertionPredicate obo:RO_0002292 ;
@@ -4693,6 +5157,13 @@ LIMIT {{limit}}
             "Maximum number of assertion rows to return.",
             default=1000,
             minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the named-entity data; omit for the default. "
+            "For another space, pass a graph IRI from brainkb_read_space or brainkb_list_spaces.",
+            default="https://www.brainkb.org/named-entity/",
         ),
     ),
 ))
