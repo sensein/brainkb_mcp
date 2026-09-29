@@ -145,6 +145,8 @@ backend. Three inputs are therefore treated as hostile:
 | `MCP_UPLOAD_TTL_MIN` | `360` | stale uploads are swept |
 | `MCP_ALLOW_SHARED_IDENTITY` | `false` | Opt in to `BRAINKB_TOKEN` as an ambient identity (single-user HTTP only) |
 | `MCP_PUBLIC_HOST` | *(empty → from the request, see [Landing page address](#landing-page-address-main-vs-sandbox))* | Public hostname the landing page puts in its sample commands |
+| `MCP_OAUTH_ENABLED` | `true` | OAuth for connector apps (discovery, automatic client registration, sign-in page); see [Connecting apps](#connecting-apps-perplexity-claudeai-chatgpt--oauth) |
+| `MCP_OAUTH_SECRET` | *(unset → random per process)* | Key that signs client IDs and encrypts auth codes and refresh tokens. **Set it on every hosted deployment** |
 
 **Backend URL allowlist.** The base URL is the *destination of requests that carry
 credentials* — the caller's bearer token, the env PAT, a session's stored
@@ -292,6 +294,64 @@ automatically the first time they sign in with **Globus/ORCID/GitHub**
 (`brainkb_globus_login` → `brainkb_finish_login`); there is no separate register
 step (the backend `/api/register` is disabled). Password login (`brainkb_login`)
 works for accounts that already exist.
+
+### Connecting apps (Perplexity, claude.ai, ChatGPT) — OAuth
+
+Connector apps add a remote MCP server by URL alone. They read the server's OAuth
+metadata, register themselves (dynamic client registration, RFC 7591), send the
+user to a sign-in page, and receive a token. Without this, the app asks for a
+client ID and secret by hand ("Server does not support automatic registration").
+
+In the app, enter the MCP URL, choose **OAuth**, and leave client ID and secret
+empty:
+
+| Deployment | MCP server URL |
+|---|---|
+| Main | `https://mcp.brainkb.org/mcp` |
+| Sandbox | `https://mcp.sandbox.brainkb.org/mcp` |
+
+The app then opens a BrainKB sign-in page (`/oauth/login`) that names the app and
+where access will be sent. The user signs in with Globus, ORCID or GitHub, or
+pastes a one-time code or a Personal Access Token. The token the app receives is
+the user's own BrainKB credential, sent as `Authorization: Bearer` on each MCP
+request, so it is resolved exactly like option 1 above.
+
+Routes, all unauthenticated: `/.well-known/oauth-protected-resource[/mcp]`,
+`/.well-known/oauth-authorization-server[/mcp]`, `/register`, `/authorize`,
+`/token`, `/oauth/login`, `/oauth/callback`. The issuer follows the same host
+rules as the [landing page](#landing-page-address-main-vs-sandbox), so each
+deployment advertises its own address.
+
+**`MCP_OAUTH_SECRET`.** Nothing is stored server-side: client IDs are signed, and
+auth codes and refresh tokens are encrypted, with keys derived from this secret.
+That is why it must be set:
+
+- **Unset:** a random key is generated at startup (and a warning logged). Every
+  restart or redeploy invalidates all registered apps and refresh tokens, so users
+  must reconnect. With more than one replica, a request that lands on a different
+  replica fails.
+- **Set:** apps stay connected across restarts, and all replicas of one
+  deployment share it.
+
+Generate one per deployment and keep it in the secret store, not in the image:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Use **different** secrets for main and sandbox, so a client or token issued by one
+is rejected by the other. Rotating the secret disconnects every app (they re-run
+sign-in); it does not affect PATs or BrainKB refresh tokens themselves.
+
+**Sign-in round trip.** The sign-in buttons use usermanagement's CLI OAuth with
+`return_to=https://<host>/oauth/callback`, so the browser comes back without a
+copy-paste step. usermanagement only honours URLs listed in
+`USERMANAGEMENT_CLI_RETURN_URLS` (default: the main and sandbox
+`/oauth/callback` URLs). An older usermanagement shows the one-time code instead;
+the user presses Back and pastes it into the sign-in page.
+
+Set `MCP_OAUTH_ENABLED=false` to turn all of this off; the header, PAT and
+in-session login paths keep working either way.
 
 ### Expiration — what lasts how long
 
@@ -462,6 +522,11 @@ MCP_BIND_ADDR=0.0.0.0
 # Address the landing page shows. Empty works when the proxy forwards Host; set it
 # to pin the deployment: mcp.brainkb.org (main) or mcp.sandbox.brainkb.org (sandbox).
 # MCP_PUBLIC_HOST=mcp.sandbox.brainkb.org
+
+# Key for connector-app OAuth (Perplexity, claude.ai, ChatGPT). Required for apps
+# to stay connected across restarts; use a different value per deployment.
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+MCP_OAUTH_SECRET=<generated secret>
 ```
 
 The proxy must set the forwarding header from what *it* observed —
