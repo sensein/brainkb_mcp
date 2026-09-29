@@ -65,6 +65,8 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_search(q, space?, limit?, offset?)` | Access-filtered full-text search |
 | `brainkb_list_registered_graphs()` | List visible registered graphs |
 | `brainkb_sparql(query)` | Arbitrary SPARQL (**admin** role) |
+| `brainkb_qa_list(category?, search?)` | No args: menu of QA categories with descriptions. With `category`/`search`: matching canned questions and their parameters |
+| `brainkb_qa_run(query_id, params?)` | Run a canned question; params are validated and escaped. Same role as `brainkb_sparql`. Adding queries: [guide.md](guide.md) |
 | `brainkb_provenance_job(job_id)` | PROV-O bundle for a job |
 | `brainkb_provenance_graph(graph_iri)` | PROV-O history for a graph |
 | `brainkb_delta(job_id)` | Exact triples a job added |
