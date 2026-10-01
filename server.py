@@ -298,11 +298,12 @@ def _client_id() -> str:
     return f"sess:{sk}" if sk is not None else "local"
 
 
-def _rate_ok(bucket: str, limit: int) -> bool:
-    """True if this caller may proceed in `bucket`; False if the limit is hit."""
+def _rate_ok(bucket: str, limit: int, cid: Optional[str] = None) -> bool:
+    """True if this caller may proceed in `bucket`; False if the limit is hit.
+    `cid` identifies the caller outside an MCP request (plain HTTP routes)."""
     if not _RL_ENABLED or limit <= 0:
         return True
-    cid = _client_id()
+    cid = cid or _client_id()
     if cid == "local":
         return True  # stdio single-user — nothing to throttle
     now = time.time()
@@ -2891,6 +2892,64 @@ async def _logo(request: Any) -> Any:
         return PlainTextResponse("not found\n", status_code=404)
     return FileResponse(_LOGO_PATH, media_type="image/png",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _http_client_id(request: Any) -> str:
+    """_client_id() for a plain HTTP route, which has a request but no MCP context."""
+    peer = getattr(getattr(request, "client", None), "host", None)
+    if _peer_trusted(peer):
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            return "ip:" + xff.split(",")[-1].strip()
+        xri = request.headers.get("x-real-ip", "")
+        if xri:
+            return "ip:" + xri.strip()
+    return "ip:" + (peer or "unknown")
+
+
+def _public_origin(request: Any) -> str:
+    """Origin the OAuth metadata and redirects name: https://<public host>.
+
+    Same host rules as the landing page, plus plain-http loopback so the flow can
+    be exercised locally. The issuer and callback URL must never be caller-chosen.
+    """
+    host = (request.headers.get("host") or "").split(",")[0].strip().lower()
+    if not os.getenv("MCP_PUBLIC_HOST", "").strip() and host.split(":")[0] in ("localhost", "127.0.0.1") \
+            and _HOST_RE.match(host):
+        return f"http://{host}"
+    return f"https://{_self_host(request)}"
+
+
+def _oauth_start_login(provider: str, return_to: str) -> str:
+    r = httpx.post(f"{_UM_URL}/api/auth/cli/start",
+                   json={"provider": provider, "return_to": return_to}, timeout=30)
+    r.raise_for_status()
+    return r.json()["authorize_url"]
+
+
+def _oauth_redeem_code(code: str) -> Optional[str]:
+    try:
+        r = httpx.post(f"{_UM_URL}/api/auth/cli/exchange", json={"code": code}, timeout=30)
+        return r.json().get("refresh_token") if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+# MCP OAuth for connector apps (Perplexity, claude.ai, ChatGPT, ...): discovery,
+# dynamic client registration, and a BrainKB sign-in page. See oauth_server.py.
+# Sign-in always uses the DEFAULT backend (BRAINKB_URL's usermanagement): an app
+# connecting by URL cannot pick another, and its token is resolved against it.
+_OAUTH_ENABLED = _IS_REMOTE and os.getenv("MCP_OAUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+if _OAUTH_ENABLED:
+    import oauth_server
+
+    mcp._custom_starlette_routes.extend(oauth_server.build_routes(oauth_server.Hooks(
+        origin=_public_origin,
+        start_login=_oauth_start_login,
+        redeem_code=_oauth_redeem_code,
+        check_pat=lambda pat: _pat_exchange(_UM_URL, pat, _AUD_QUERY) is not None,
+        rate_ok=lambda request: _rate_ok("auth", _RL_AUTH, _http_client_id(request)),
+    )))
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

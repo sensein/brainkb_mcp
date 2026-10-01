@@ -342,8 +342,10 @@ def _page(title: str, inner: str, status: int = 200) -> HTMLResponse:
     return HTMLResponse(body, status_code=status, headers={
         "Cache-Control": "no-store",
         "X-Frame-Options": "DENY",
+        # No form-action: browsers apply it to the redirect after a submit, and
+        # these forms redirect to the sign-in provider and then to the app.
         "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; "
-                                   "form-action 'self'; frame-ancestors 'none'",
+                                   "frame-ancestors 'none'",
         "Referrer-Policy": "no-referrer",
     })
 
