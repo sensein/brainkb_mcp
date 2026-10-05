@@ -2323,6 +2323,13 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .connect p{color:var(--muted);line-height:1.7;font-size:15px}
 .codebox{position:relative;border:1px solid #dde3ef;border-radius:9px;background:#fff;box-shadow:0 10px 25px #28375906;overflow:hidden}
 .codebox + .codebox{margin-top:14px}
+.tabs.clients{margin:0 0 12px}
+.codebox[hidden]{display:none}
+.codebox[data-pane]{margin-top:0!important}
+.steps{margin:0;padding:12px 18px 14px 36px;border-top:1px solid var(--line);font-size:13px;line-height:1.7;color:var(--muted)}
+.steps code{font-size:12px;color:#1e40af}
+.steps a{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
+.tested{display:inline-block;margin-left:4px;padding:0 5px;border-radius:4px;font-size:10px;line-height:16px;color:#1f6b55;background:#ecfdf5;border:1px solid #bbf7d0;vertical-align:1px}
 .codebox-head{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line);font:11px 'IBM Plex Mono',monospace;color:#929aad}
 .codebox pre{margin:0;padding:16px 18px;font-size:12.5px;line-height:1.8;color:#3d4c69;white-space:pre-wrap;word-break:break-all}
 .copy{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 9px;font:11px 'IBM Plex Mono',monospace;color:#788398}
@@ -2459,14 +2466,24 @@ _LANDING_JS = """
     render(current);
     schedule();
   }
+  var clientButtons = document.querySelectorAll('[data-client]');
+  clientButtons.forEach(function (b) {
+    b.addEventListener('click', function () {
+      clientButtons.forEach(function (o) { o.setAttribute('aria-pressed', String(o === b)); });
+      document.querySelectorAll('[data-pane]').forEach(function (p) {
+        p.hidden = p.dataset.pane !== b.dataset.client;
+      });
+    });
+  });
   document.querySelectorAll('.codebox').forEach(function (box) {
     var btn = box.querySelector('.copy');
     if (!btn) return;
     if (!navigator.clipboard) { btn.remove(); return; }
+    var label = btn.textContent;
     btn.addEventListener('click', function () {
-      navigator.clipboard.writeText(box.querySelector('pre').innerText).then(function () {
+      navigator.clipboard.writeText(box.dataset.copy || box.querySelector('pre').innerText).then(function () {
         btn.textContent = 'Copied';
-        setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+        setTimeout(function () { btn.textContent = label; }, 1500);
       });
     });
   });
@@ -2783,16 +2800,101 @@ async def _landing(request: Any) -> Any:
 <section class="connect" id="connect">
   <div>
     <span class="eyebrow">Connect</span>
-    <h2>One command<br>to connect.</h2>
-    <p>This host is an API, not a web app. The protocol endpoint is <code>/mcp</code>,
+    <h2>Connect from<br>any MCP client.</h2>
+    <p>This host is an API, not a web app. The protocol endpoint is <code>https://{host}/mcp</code>,
     over streamable HTTP, so any MCP client that supports it can connect. Each caller authenticates per request with their own BrainKB
     credential: an <code>Authorization: Bearer</code> header, or a personal access token
     via the login tools. There is no shared or ambient identity.</p>
+    <p>Connector apps such as Perplexity, claude.ai and ChatGPT need only the URL: choose
+    <b>OAuth</b>, leave the client ID and secret empty, and sign in on the BrainKB page that
+    opens (Globus, ORCID, GitHub, or a personal access token).</p>
   </div>
   <div>
-    <div class="codebox">
-      <div class="codebox-head"><span>Claude Code</span><button class="copy" type="button">Copy</button></div>
+    <div class="tabs clients" role="group" aria-label="MCP client">
+      <button type="button" data-client="claude-code" aria-pressed="true">Claude Code <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
+      <button type="button" data-client="apps" aria-pressed="false">Perplexity <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span> · claude.ai <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span> · ChatGPT</button>
+      <button type="button" data-client="cursor" aria-pressed="false">Cursor <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
+      <button type="button" data-client="vscode" aria-pressed="false">VS Code <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
+      <button type="button" data-client="copilot" aria-pressed="false">Copilot in VS Code <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
+      <button type="button" data-client="other" aria-pressed="false">Other clients</button>
+    </div>
+    <div class="codebox" data-pane="claude-code">
+      <div class="codebox-head"><span>Claude Code · terminal</span><button class="copy" type="button">Copy</button></div>
       <pre>claude mcp add --scope user --transport http brainkb https://{host}/mcp</pre>
+      <ol class="steps">
+        <li>Run the command in a terminal, then start <code>claude</code>.</li>
+        <li>Ask anything about BrainKB; on first use, ask Claude to sign you in (it hands you a browser link).</li>
+      </ol>
+    </div>
+    <div class="codebox" data-pane="apps" data-copy="https://{host}/mcp" hidden>
+      <div class="codebox-head"><span>Connector apps · add a custom connector</span><button class="copy" type="button">Copy URL</button></div>
+      <pre>1. Open the app's connector settings
+     Perplexity   Settings → Connectors → + Custom connector   ✓ tested
+     claude.ai    Settings → Connectors → Add custom connector     ✓ tested
+     ChatGPT      Settings → Apps &amp; Connectors → Create (developer mode)
+2. Server URL      https://{host}/mcp
+3. Authentication  OAuth (leave client ID and secret empty)
+4. Sign in on the BrainKB page that opens, then allow access</pre>
+    </div>
+    <div class="codebox" data-pane="cursor" hidden>
+      <div class="codebox-head"><span>Cursor · ~/.cursor/mcp.json</span><button class="copy" type="button">Copy</button></div>
+      <pre>{{
+  "mcpServers": {{
+    "brainkb": {{ "url": "https://{host}/mcp" }}
+  }}
+}}</pre>
+      <ol class="steps">
+        <li>In Cursor, open <b>Customize → MCPs → New MCP Server</b> (“Add a Custom MCP Server”); in the classic editor, <b>Cursor Settings → MCP → Add new MCP server</b>. Either opens <code>~/.cursor/mcp.json</code> (on Windows: <code>%USERPROFILE%&#92;.cursor&#92;mcp.json</code>).</li>
+        <li>Paste the snippet and <b>save</b>. <code>brainkb</code> appears under <b>Connected</b> with its tools enabled; if it shows <b>Needs login</b>, click it and sign in on the BrainKB page.</li>
+        <li>Start a <b>New Chat</b> and ask; Cursor asks before running each tool.</li>
+      </ol>
+    </div>
+    <div class="codebox" data-pane="vscode" hidden>
+      <div class="codebox-head"><span>VS Code · .vscode/mcp.json</span><button class="copy" type="button">Copy</button></div>
+      <pre>{{
+  "servers": {{
+    "brainkb": {{ "type": "http", "url": "https://{host}/mcp" }}
+  }}
+}}</pre>
+      <ol class="steps">
+        <li>Create the file, or open the Command Palette (<b>⇧⌘P</b> on macOS, <b>Ctrl+Shift+P</b> on Windows/Linux), run <b>MCP: Add Server</b> → HTTP → paste the URL. For every workspace, use <b>MCP: Open User Configuration</b>.</li>
+        <li>Click <b>Start</b> above <code>brainkb</code>, accept the sign-in prompt, and sign in on the BrainKB page.</li>
+        <li>Open Copilot Chat in <b>Agent</b> mode, enable the BrainKB tools in the tools picker, and ask your question.</li>
+        <li>More options (user vs. workspace config, sandboxing, troubleshooting): <a href="https://code.visualstudio.com/docs/agent-customization/mcp-servers" target="_blank" rel="noopener">VS Code docs: MCP servers ↗</a></li>
+      </ol>
+    </div>
+    <div class="codebox" data-pane="copilot" hidden>
+      <div class="codebox-head"><span>GitHub Copilot in VS Code · ~/.copilot/mcp-config.json</span><button class="copy" type="button">Copy</button></div>
+      <pre>{{
+  "mcpServers": {{
+    "brainkb": {{
+      "type": "http",
+      "url": "https://{host}/mcp",
+      "tools": ["*"]
+    }}
+  }}
+}}</pre>
+      <ol class="steps">
+        <li>In VS Code, open <b>File → Open File…</b> (or the Command Palette: <b>⇧⌘P</b> on macOS, <b>Ctrl+Shift+P</b> on Windows/Linux) and create <code>~/.copilot/mcp-config.json</code> (on Windows: <code>%USERPROFILE%&#92;.copilot&#92;mcp-config.json</code>). It applies to Copilot everywhere, even with no folder open.</li>
+        <li>Paste the snippet and <b>save</b>. <code>"tools": ["*"]</code> enables every BrainKB tool; list tool names instead to allow only some.</li>
+        <li>Open Copilot Chat, switch to <b>Agent</b> mode, sign in when prompted, and ask, e.g. <i>"What can I do with BrainKB?"</i> Approve each tool call when asked.</li>
+        <li>See also: <a href="https://code.visualstudio.com/docs/agent-customization/mcp-servers" target="_blank" rel="noopener">VS Code docs: MCP servers ↗</a></li>
+      </ol>
+    </div>
+    <div class="codebox" data-pane="other" hidden>
+      <div class="codebox-head"><span>Clients that only run local (stdio) servers · via mcp-remote</span><button class="copy" type="button">Copy</button></div>
+      <pre>{{
+  "mcpServers": {{
+    "brainkb": {{
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://{host}/mcp"]
+    }}
+  }}
+}}</pre>
+      <ol class="steps">
+        <li>Paste into the client's MCP config (e.g. Claude Desktop, Windsurf) and restart it. Needs Node.js.</li>
+        <li><code>mcp-remote</code> opens the BrainKB sign-in page in your browser on first connect.</li>
+      </ol>
     </div>
     <div class="codebox">
       <div class="codebox-head"><span>Large RDF file · python</span><button class="copy" type="button">Copy</button></div>
@@ -2841,7 +2943,8 @@ requests.post("https://{host}/upload",
   </div>
   <div>
     <details open><summary>What is BrainKB MCP?</summary><p>A Model Context Protocol
-    server for the BrainKB knowledge base. MCP clients such as Claude Code connect to
+    server for the BrainKB knowledge base. MCP clients such as Claude Code, Cursor, VS Code,
+    Perplexity, claude.ai and ChatGPT connect to
     <code>https://{host}/mcp</code>, and your agent can then work with workspaces,
     ingest, search, ready-made questions and provenance on your behalf.</p></details>
     <details><summary>Can I use BrainKB through skills?</summary><p>Yes. The
@@ -2851,6 +2954,13 @@ requests.post("https://{host}/upload",
     <details><summary>How does my agent sign in?</summary><p>With a personal access token
     sent as an <code>Authorization: Bearer</code> header, or through the Globus, ORCID or
     GitHub login tools, which hand you a browser link. Every call runs as you.</p></details>
+    <details><summary>How do I add BrainKB to Perplexity, claude.ai or ChatGPT?</summary><p>Add
+    a custom connector with the URL <code>https://{host}/mcp</code> and choose OAuth, leaving
+    the client ID and secret empty. The app registers itself and opens a BrainKB sign-in
+    page; sign in with Globus, ORCID or GitHub, or paste a personal access token. If an app
+    says the server "does not support automatic registration", it is not using OAuth
+    discovery: pick OAuth explicitly, or use a client that does. Custom connectors may
+    need a paid or developer plan in the app.</p></details>
     <details><summary>Who can see my data?</summary><p>Private spaces are visible to their
     members only. Public spaces are readable by anyone, including unauthenticated clients.
     Ready-made questions currently need an Admin role.</p></details>
