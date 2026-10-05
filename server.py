@@ -2326,18 +2326,47 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .tabs.clients{margin:0 0 12px}
 .codebox[hidden]{display:none}
 .codebox[data-pane]{margin-top:0!important}
+.pane[hidden]{display:none}
+.ok{color:#16a34a;font-weight:600;margin-left:3px}
+.legend{font-size:13px!important}
+.legend a,.steps a{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
+.connect p code{font-size:12.5px;color:#1e40af}
+.faq-code{margin-top:14px}
+.tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;line-height:16px}
+.tag.skill{color:#6d28d9;background:#f5f3ff;border:1px solid #ddd6fe}
+.tag.mcp{color:#1d4ed8;background:#eff6ff;border:1px solid #bfdbfe}
+.connect .links{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}
+.connect p code{font-size:12.5px;color:#1e40af}
+.setup{text-align:center;padding:10px 0 80px}
+.setup h2{margin-top:12px}
+.setup-lead{max-width:680px;margin:16px auto 0;color:var(--muted);font-size:16px;line-height:1.7}
+.segmented{display:inline-flex;gap:4px;margin:32px auto 26px;padding:5px;border:1px solid var(--line);border-radius:12px;background:var(--pale)}
+.segmented button{border:0;background:transparent;border-radius:8px;padding:9px 18px;font-size:14px;color:#788398;cursor:pointer}
+.segmented button[aria-pressed=true]{background:#fff;color:var(--ink);box-shadow:0 1px 4px #0b16281a}
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;text-align:left}
+.card{border:1px solid var(--line);border-radius:14px;background:#fff;padding:20px;min-width:0;box-shadow:0 10px 25px #28375906}
+.card.accent{border-color:#c4b5fd;background:linear-gradient(150deg,#fff,#faf5ff)}
+.card-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.card-head h4{margin:0;font-size:16px;font-weight:600}
+.card-head .tag{margin-left:4px;vertical-align:2px}
+.num{flex:none;width:34px;height:34px;border-radius:50%;background:#0f172a;color:#fff;font-size:14px;font-weight:600;line-height:34px;text-align:center}
+.card p{margin:0 0 12px;font-size:14px;line-height:1.65;color:var(--muted)}
+.card p.hint{margin:12px 0 0;font-size:12.5px}
+.card code{font-size:12px;color:#1e40af;overflow-wrap:anywhere}
+.card a:not(.btn){color:var(--blue);text-decoration:underline;text-underline-offset:2px}
+.card-actions{margin-top:14px}
+.card-actions .btn{padding:9px 15px;font-size:13px}
+.setup-foot{margin:26px auto 0;max-width:760px;color:var(--muted);font-size:13px;line-height:1.7}
+.setup-foot code{font-size:12px;color:#1e40af}
+.setup-foot a{color:var(--blue)}
+@media(max-width:900px){.cards{grid-template-columns:1fr}}
 .steps{margin:0;padding:12px 18px 14px 36px;border-top:1px solid var(--line);font-size:13px;line-height:1.7;color:var(--muted)}
 .steps code{font-size:12px;color:#1e40af}
 .steps a{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
-.tested{display:inline-block;margin-left:4px;padding:0 5px;border-radius:4px;font-size:10px;line-height:16px;color:#1f6b55;background:#ecfdf5;border:1px solid #bbf7d0;vertical-align:1px}
 .codebox-head{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line);font:11px 'IBM Plex Mono',monospace;color:#929aad}
-.codebox pre{margin:0;padding:16px 18px;font-size:12.5px;line-height:1.8;color:#3d4c69;white-space:pre-wrap;word-break:break-all}
+.codebox pre{margin:0;padding:16px 18px;font-size:12.5px;line-height:1.8;color:#3d4c69;white-space:pre;overflow-x:auto}
 .copy{border:1px solid var(--line);background:#fff;border-radius:5px;padding:4px 9px;font:11px 'IBM Plex Mono',monospace;color:#788398}
 .copy:hover{color:var(--blue);border-color:#bfdbfe;background:#eff6ff}
-.skillcard{margin-top:14px;display:flex;gap:16px;align-items:flex-start;border:1px solid #bfdbfe;border-radius:9px;padding:18px 20px;background:linear-gradient(150deg,#fff,#eff6ff)}
-.skillcard strong{font-size:16px;font-weight:600}
-.skillcard p{margin:6px 0 14px;font-size:14px}
-.skillcard .btn{padding:9px 15px;font-size:13px}
 details p a{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
 
 .workflow{background:#f7f9fd;border:1px solid var(--line);border-radius:14px;display:grid;grid-template-columns:.85fr 1.15fr;gap:40px;padding:42px;margin-bottom:75px}
@@ -2469,8 +2498,9 @@ _LANDING_JS = """
   var clientButtons = document.querySelectorAll('[data-client]');
   clientButtons.forEach(function (b) {
     b.addEventListener('click', function () {
-      clientButtons.forEach(function (o) { o.setAttribute('aria-pressed', String(o === b)); });
-      document.querySelectorAll('[data-pane]').forEach(function (p) {
+      var group = b.closest('section');
+      group.querySelectorAll('[data-client]').forEach(function (o) { o.setAttribute('aria-pressed', String(o === b)); });
+      group.querySelectorAll('[data-pane]').forEach(function (p) {
         p.hidden = p.dataset.pane !== b.dataset.client;
       });
     });
@@ -2695,6 +2725,9 @@ async def _landing(request: Any) -> Any:
     from starlette.responses import HTMLResponse
 
     host = html.escape(_self_host(request))
+    # The brainkb npm installer registers production by default; the sandbox page
+    # tells it which server to register instead.
+    npx_install = "npx brainkb install" + (" --mcp sandbox" if "sandbox" in host else "")
     cats = qa_registry.categories()
     total = sum(c["query_count"] for c in cats)
 
@@ -2745,6 +2778,7 @@ async def _landing(request: Any) -> Any:
     <a href="#capabilities">Capabilities</a>
     <a href="#workflow">How it works</a>
     <a href="#questions">Questions</a>
+    <a href="#skill">Skill</a>
     <a class="btn navcta primary" href="#connect">Connect your agent</a>
   </nav>
 </header>
@@ -2801,29 +2835,37 @@ async def _landing(request: Any) -> Any:
   <div>
     <span class="eyebrow">Connect</span>
     <h2>Connect from<br>any MCP client.</h2>
-    <p>This host is an API, not a web app. The protocol endpoint is <code>https://{host}/mcp</code>,
-    over streamable HTTP, so any MCP client that supports it can connect. Each caller authenticates per request with their own BrainKB
-    credential: an <code>Authorization: Bearer</code> header, or a personal access token
-    via the login tools. There is no shared or ambient identity.</p>
-    <p>Connector apps such as Perplexity, claude.ai and ChatGPT need only the URL: choose
-    <b>OAuth</b>, leave the client ID and secret empty, and sign in on the BrainKB page that
-    opens (Globus, ORCID, GitHub, or a personal access token).</p>
+    <p>Point your client at <code>https://{host}/mcp</code> (streamable HTTP). Every call
+    runs as you: the client signs in with your own BrainKB account, never a shared one.</p>
+    <p>Apps that connect by URL (Perplexity, claude.ai, ChatGPT) choose <b>OAuth</b> with no
+    client ID or secret, then sign in on the BrainKB page that opens.</p>
+    <p class="legend"><span class="ok">✓</span> tested with BrainKB · want the agent skill too? See <a href="#skill">Skill</a>.</p>
   </div>
   <div>
     <div class="tabs clients" role="group" aria-label="MCP client">
-      <button type="button" data-client="claude-code" aria-pressed="true">Claude Code <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
-      <button type="button" data-client="apps" aria-pressed="false">Perplexity <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span> · claude.ai <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span> · ChatGPT</button>
-      <button type="button" data-client="cursor" aria-pressed="false">Cursor <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
-      <button type="button" data-client="vscode" aria-pressed="false">VS Code <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
-      <button type="button" data-client="copilot" aria-pressed="false">Copilot in VS Code <span class="tested" title="Tested with BrainKB MCP">✓ Tested</span></button>
+      <button type="button" data-client="claude-code" aria-pressed="true">Claude Code <span class="ok" title="Tested">✓</span></button>
+      <button type="button" data-client="codex" aria-pressed="false">Codex</button>
+      <button type="button" data-client="apps" aria-pressed="false">Perplexity <span class="ok" title="Tested">✓</span> · claude.ai <span class="ok" title="Tested">✓</span> · ChatGPT</button>
+      <button type="button" data-client="cursor" aria-pressed="false">Cursor <span class="ok" title="Tested">✓</span></button>
+      <button type="button" data-client="vscode" aria-pressed="false">VS Code <span class="ok" title="Tested">✓</span></button>
+      <button type="button" data-client="copilot" aria-pressed="false">Copilot in VS Code <span class="ok" title="Tested">✓</span></button>
       <button type="button" data-client="other" aria-pressed="false">Other clients</button>
     </div>
     <div class="codebox" data-pane="claude-code">
       <div class="codebox-head"><span>Claude Code · terminal</span><button class="copy" type="button">Copy</button></div>
       <pre>claude mcp add --scope user --transport http brainkb https://{host}/mcp</pre>
       <ol class="steps">
-        <li>Run the command in a terminal, then start <code>claude</code>.</li>
-        <li>Ask anything about BrainKB; on first use, ask Claude to sign you in (it hands you a browser link).</li>
+        <li>Start <code>claude</code> and say <i>“log me in to BrainKB”</i>; it hands you a browser link.</li>
+        <li>For the server plus the BrainKB skill in one step, use <code>{npx_install}</code> instead (<a href="#skill">Skill</a>).</li>
+      </ol>
+    </div>
+    <div class="codebox" data-pane="codex" hidden>
+      <div class="codebox-head"><span>Codex · ~/.codex/config.toml</span><button class="copy" type="button">Copy</button></div>
+      <pre>[mcp_servers.brainkb]
+url = "https://{host}/mcp"</pre>
+      <ol class="steps">
+        <li>Add it to <code>~/.codex/config.toml</code>, start <code>codex</code>, and say <i>“log me in to BrainKB”</i>.</li>
+        <li>Skill for Codex: <code>{npx_install} --agent codex</code> (<a href="#skill">Skill</a>).</li>
       </ol>
     </div>
     <div class="codebox" data-pane="apps" data-copy="https://{host}/mcp" hidden>
@@ -2896,25 +2938,71 @@ async def _landing(request: Any) -> Any:
         <li><code>mcp-remote</code> opens the BrainKB sign-in page in your browser on first connect.</li>
       </ol>
     </div>
-    <div class="codebox">
-      <div class="codebox-head"><span>Large RDF file · python</span><button class="copy" type="button">Copy</button></div>
-      <pre>import requests
-requests.post("https://{host}/upload",
-              params={{"filename": "review.ttl", "graph": "&lt;graph_iri&gt;"}},
-              headers={{"Authorization": f"Bearer {{TOKEN}}"}},
-              data=open("review.ttl", "rb"))   # streamed off disk</pre>
-    </div>
-    <div class="skillcard">
-      <span class="ico">◇</span>
-      <div>
-        <strong>Use it with BrainKB Skills</strong>
-        <p>Add the BrainKB skill to your agent as well. It teaches the agent how to use
-        this server well: confirm who it is acting as, ingest large files safely, pick the
-        right workspace and question, and answer provenance questions.</p>
-        <a class="btn" href="https://github.com/sensein/agent_skills/tree/main/skills/brainkb" target="_blank" rel="noopener">BrainKB Skills on GitHub ↗</a>
-      </div>
+  </div>
+</section>
+
+<section class="setup" id="skill">
+  <span class="eyebrow">Skill</span>
+  <h2>Connect with the BrainKB skill.</h2>
+  <p class="setup-lead">One command installs the BrainKB skill and registers this MCP server. The skill
+  teaches your agent to confirm who it is acting as, ingest large files safely, pick the right
+  workspace and question, and answer provenance questions.</p>
+  <div class="segmented" role="group" aria-label="Agent">
+    <button type="button" data-client="skill-claude" aria-pressed="true">Claude Code</button>
+    <button type="button" data-client="skill-codex" aria-pressed="false">Codex</button>
+    <button type="button" data-client="skill-other" aria-pressed="false">Any SKILL.md agent</button>
+  </div>
+  <div class="pane" data-pane="skill-claude">
+    <div class="cards">
+      <div class="card"><div class="card-head"><span class="num">1</span><h4>Install Claude Code</h4></div>
+        <div class="codebox"><div class="codebox-head"><span>terminal</span><button class="copy" type="button">Copy</button></div>
+        <pre>npm install -g @anthropic-ai/claude-code</pre></div>
+        <div class="card-actions"><a class="btn" href="https://docs.claude.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Get Claude Code ↗</a></div></div>
+      <div class="card accent"><div class="card-head"><span class="num">2</span><h4>Install the skill <span class="tag skill">Skill + MCP server</span></h4></div>
+        <p>Adds the skill to <code>~/.claude/skills/brainkb</code> and registers <code>brainkb</code> with Claude Code.</p>
+        <div class="codebox"><div class="codebox-head"><span>terminal</span><button class="copy" type="button">Copy</button></div>
+        <pre>{npx_install}</pre></div>
+        <p class="hint"><code>--scope project</code> for this project only · <code>--mcp both</code> for production and sandbox · <code>npx brainkb status</code> to check.</p></div>
+      <div class="card"><div class="card-head"><span class="num">3</span><h4>Sign in and ask</h4></div>
+        <p>Start <code>claude</code>, then:</p>
+        <div class="codebox"><div class="codebox-head"><span>prompt</span><button class="copy" type="button">Copy</button></div>
+        <pre>log me in to BrainKB</pre></div>
+        <p class="hint">Opens a browser sign-in (Globus, ORCID or GitHub). Then ask, e.g. <i>“Which papers mention the subthalamic nucleus?”</i></p></div>
     </div>
   </div>
+  <div class="pane" data-pane="skill-codex" hidden>
+    <div class="cards">
+      <div class="card"><div class="card-head"><span class="num">1</span><h4>Install Codex</h4></div>
+        <div class="codebox"><div class="codebox-head"><span>terminal</span><button class="copy" type="button">Copy</button></div>
+        <pre>npm install -g @openai/codex</pre></div>
+        <div class="card-actions"><a class="btn" href="https://github.com/openai/codex" target="_blank" rel="noopener">Get Codex ↗</a></div></div>
+      <div class="card accent"><div class="card-head"><span class="num">2</span><h4>Install the skill <span class="tag skill">Skill</span></h4></div>
+        <div class="codebox"><div class="codebox-head"><span>terminal</span><button class="copy" type="button">Copy</button></div>
+        <pre>{npx_install} --agent codex</pre></div>
+        <p class="hint">Installs to <code>~/.agents/skills/brainkb</code>; <code>--agent both</code> adds Claude Code too.</p></div>
+      <div class="card"><div class="card-head"><span class="num">3</span><h4>Add the server <span class="tag mcp">MCP server</span></h4></div>
+        <p>Codex is not registered automatically. Add to <code>~/.codex/config.toml</code>, then start <code>codex</code> and say <i>“log me in to BrainKB”</i>.</p>
+        <div class="codebox"><div class="codebox-head"><span>~/.codex/config.toml</span><button class="copy" type="button">Copy</button></div>
+        <pre>[mcp_servers.brainkb]
+url = "https://{host}/mcp"</pre></div></div>
+    </div>
+  </div>
+  <div class="pane" data-pane="skill-other" hidden>
+    <div class="cards">
+      <div class="card accent"><div class="card-head"><span class="num">1</span><h4>Install the skill <span class="tag skill">Skill</span></h4></div>
+        <div class="codebox"><div class="codebox-head"><span>terminal</span><button class="copy" type="button">Copy</button></div>
+        <pre>npx brainkb install --dest ~/my-agent/skills --mcp none</pre></div>
+        <p class="hint">Use the folder your agent reads <code>SKILL.md</code> skills from.</p></div>
+      <div class="card"><div class="card-head"><span class="num">2</span><h4>Add the server <span class="tag mcp">MCP server</span></h4></div>
+        <p>Add <code>https://{host}/mcp</code> (streamable HTTP) in the agent's MCP settings. Per-client steps are under <a href="#connect">Connect</a>.</p></div>
+      <div class="card"><div class="card-head"><span class="num">3</span><h4>Sign in and ask</h4></div>
+        <p>Ask the agent to log you in to BrainKB, then ask your question.</p></div>
+    </div>
+  </div>
+  <p class="setup-foot">Re-running <code>install</code> updates the skill; a copy you edited is never overwritten silently.
+  <code>npx brainkb uninstall</code> removes it. Node.js 18.17+.
+  <a href="https://www.npmjs.com/package/brainkb" target="_blank" rel="noopener">brainkb on npm ↗</a> ·
+  <a href="https://github.com/sensein/agent_skills/tree/main/skills/brainkb" target="_blank" rel="noopener">Skill on GitHub ↗</a></p>
 </section>
 
 <section class="workflow" id="workflow">
@@ -2965,9 +3053,18 @@ requests.post("https://{host}/upload",
     members only. Public spaces are readable by anyone, including unauthenticated clients.
     Ready-made questions currently need an Admin role.</p></details>
     <details><summary>How do I ingest a large file?</summary><p>Stream it to
-    <code>/upload</code> as shown above. The server answers <code>202</code> with an
+    <code>/upload</code>. The server answers <code>202</code> with an
     <code>upload_id</code> and ingests in the background, and your agent can follow the
-    job from there. Up to 5&nbsp;GB per file.</p></details>
+    job from there. Up to 5&nbsp;GB per file.</p>
+    <div class="codebox faq-code">
+      <div class="codebox-head"><span>Large RDF file · python</span><button class="copy" type="button">Copy</button></div>
+      <pre>import requests
+requests.post("https://{host}/upload",
+              params={{"filename": "review.ttl", "graph": "&lt;graph_iri&gt;"}},
+              headers={{"Authorization": f"Bearer {{TOKEN}}"}},
+              data=open("review.ttl", "rb"))   # streamed off disk</pre>
+    </div>
+    </details>
     <details><summary>Why does /mcp say "Not Acceptable" in a browser?</summary><p>That is
     the endpoint working correctly: a browser GET sends no
     <code>Accept: text/event-stream</code>, so the server refuses it. Use an MCP client.</p></details>
