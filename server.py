@@ -1791,7 +1791,7 @@ def brainkb_sparql(sparql_query: str) -> Any:
 
 # Each module registers its QAQuery objects on import. A new category is a new
 # module plus one entry here.
-QA_MODULES = ("named_entities_qa",)
+QA_MODULES = ("named_entities_qa", "resources_qa")
 
 for _mod in QA_MODULES:
     importlib.import_module(_mod)
@@ -2686,8 +2686,8 @@ async def _landing(request: Any) -> Any:
         if f is None:
             cards.append(_feature_card(
                 "◈", "Ready-made questions",
-                "Vetted questions about extracted entities, cells, markers, phenotypes "
-                "and causal claims, answered from the graph without writing a query.",
+                "Vetted questions about extracted entities, cells, markers, phenotypes, "
+                "causal claims and research resources, answered from the graph without writing a query.",
                 ("How is the neocortex written across papers?", "Which entities do these papers share?"),
                 highlight=True, count=f"{total} questions"))
         else:
