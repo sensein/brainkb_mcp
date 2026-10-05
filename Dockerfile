@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py server.json qa_registry.py named_entities_qa.py oauth_server.py brainkb_logo.png ./
+COPY server.py server.json qa_registry.py named_entities_qa.py resources_qa.py oauth_server.py brainkb_logo.png ./
 
 # Runtime defaults for the hosted remote. Override BRAINKB_URL at deploy time to
 # point at your query_service (the container's localhost is NOT your backend).

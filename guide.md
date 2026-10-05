@@ -17,6 +17,7 @@ When you add a query, you don't add a tool. The model finds it through
 ```
 qa_registry.py        QAParam, QAQuery, register_category(), register(): the shared machinery
 named_entities_qa.py  register_category("named_entities", ...), then register() per query
+resources_qa.py       register_category("resources", ...): resource catalogues (tools, datasets, models)
 <your>_qa.py          any other category, same pattern
 server.py             QA_MODULES = (...) imports each module; defines the 2 tools
 ```
