@@ -2368,10 +2368,10 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .mini-line{display:flex;align-items:baseline;gap:8px;margin:5px 0;color:var(--blue)}
 .mini-line b{font-weight:400;color:#3d4c69}
 
-.navpublic{display:inline-flex;align-items:center;gap:7px;color:#0f7a58!important;background:#e7f8f0;border:1px solid #a7e3cc;border-radius:999px;padding:7px 13px;font-weight:600;font-size:13px;white-space:nowrap}
-.navpublic i{width:7px;height:7px;border-radius:50%;background:var(--green)}
-.navpublic:hover{background:#d6f3e6}
-@media(max-width:680px){.navpublic{padding:6px 10px;font-size:12px}.np-extra{display:none}}
+.navpublic{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.navpublic small{font:500 10.5px 'IBM Plex Mono',monospace;color:#0f7a58;background:#e7f8f0;border:1px solid #a7e3cc;border-radius:4px;padding:2px 5px;letter-spacing:.3px}
+nav a.navpublic:hover small{background:#d6f3e6}
+@media(max-width:680px){.navpublic small{display:none}}
 .public{border-top:1px solid var(--line)}
 .public .eyebrow{color:#0f8a63}
 .access{display:grid;grid-template-columns:1fr 1fr;gap:18px}
@@ -2854,7 +2854,7 @@ async def _landing(request: Any) -> Any:
 <header>
   <a class="logo" href="#top" aria-label="BrainKB MCP home"><img src="/logo.png" alt="" width="40" height="40">BrainKB <small>MCP</small></a>
   <nav aria-label="Main navigation">
-    <a class="navpublic" href="#public"><i></i>Open knowledge<span class="np-extra"> · no login</span></a>
+    <a class="navpublic" href="#public">Open knowledge<small>NO LOGIN</small></a>
     <a href="#capabilities">Capabilities</a>
     <a href="#workflow">How it works</a>
     <a href="#questions">Questions</a>
