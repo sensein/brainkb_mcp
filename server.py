@@ -1189,8 +1189,16 @@ def brainkb_list_spaces() -> Any:
     public.
 
     No login needed: an unauthenticated caller gets the public spaces only
-    (read-only). Log in to also see your own/member spaces."""
-    return _get("/api/spaces", anonymous=True)
+    (read-only). Log in to also see your own/member spaces.
+
+    `owner` is shown only for spaces the caller is a member of; a public space
+    read by a non-member never exposes its owner's email."""
+    out = _get("/api/spaces", anonymous=True)
+    if isinstance(out, dict) and isinstance(out.get("spaces"), list):
+        for sp in out["spaces"]:
+            if isinstance(sp, dict) and not sp.get("your_role"):
+                sp["owner"] = None
+    return out
 
 
 @mcp.tool()
