@@ -2845,7 +2845,7 @@ async def _landing(request: Any) -> Any:
       <a class="btn primary" href="#connect">Connect your agent</a>
       <a class="btn" href="#workflow">See it in action</a>
     </div>
-    <div class="note">Per-caller identity. Provenance on every change.</div>
+    <div class="note">Public spaces readable with no sign-in. Per-caller identity. Provenance on every change.</div>
   </div>
   <div class="hero-visual" aria-label="Diagram: BrainKB MCP connects your AI agent with BrainKB workspaces, the knowledge graph and provenance">
     <div class="orbit"></div><div class="orbit second"></div>
@@ -2885,7 +2885,11 @@ async def _landing(request: Any) -> Any:
     <span class="eyebrow">Connect</span>
     <h2>Connect from<br>any MCP client.</h2>
     <p>Point your client at <code>https://{host}/mcp</code> (streamable HTTP). Every call
-    runs as you: the client signs in with your own BrainKB account, never a shared one.</p>
+    that needs an account runs as you: the client signs in with your own BrainKB account,
+    never a shared one.</p>
+    <p><b>No sign-in needed to read public data.</b> Without an account, your agent can
+    list, search and read <b>public spaces</b> (read-only). Sign in to read your private
+    spaces, ingest, or use provenance, SPARQL and admin tools.</p>
     <p>Apps that connect by URL (Perplexity, claude.ai, ChatGPT) choose <b>OAuth</b> with no
     client ID or secret, then sign in on the BrainKB page that opens.</p>
     <p class="legend"><span class="ok">✓</span> tested with BrainKB · want the agent skill too? See <a href="#skill">Skill</a>.</p>
@@ -2925,7 +2929,10 @@ url = "https://{host}/mcp"</pre>
      ChatGPT      Settings → Apps &amp; Connectors → Create (developer mode)
 2. Server URL      https://{host}/mcp
 3. Authentication  OAuth (leave client ID and secret empty)
-4. Sign in on the BrainKB page that opens, then allow access</pre>
+4. Sign in on the BrainKB page that opens, then allow access
+
+Only reading public spaces? Skip sign-in: list, search and
+read of public spaces work with no authentication (read-only).</pre>
     </div>
     <div class="codebox" data-pane="cursor" hidden>
       <div class="codebox-head"><span>Cursor · ~/.cursor/mcp.json</span><button class="copy" type="button">Copy</button></div>
