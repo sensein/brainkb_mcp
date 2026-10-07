@@ -2368,6 +2368,35 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .mini-line{display:flex;align-items:baseline;gap:8px;margin:5px 0;color:var(--blue)}
 .mini-line b{font-weight:400;color:#3d4c69}
 
+.navpublic{display:inline-flex;align-items:center;gap:7px;color:#0f7a58!important;background:#e7f8f0;border:1px solid #a7e3cc;border-radius:999px;padding:7px 13px;font-weight:600;font-size:13px;white-space:nowrap}
+.navpublic i{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.navpublic:hover{background:#d6f3e6}
+@media(max-width:680px){.navpublic{padding:6px 10px;font-size:12px}.np-extra{display:none}}
+.public{border-top:1px solid var(--line)}
+.public .eyebrow{color:#0f8a63}
+.access{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.access-card{border:1px solid var(--line);border-radius:12px;padding:27px;background:linear-gradient(150deg,#fff,#f9faff)}
+.access-card.open{border-color:#a7e3cc;background:linear-gradient(150deg,#fff,#f1fbf6);box-shadow:0 10px 30px #30ad8614}
+.access-card h3{font-weight:550;font-size:20px;letter-spacing:-.4px;margin:0 0 6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.access-card .sub{font-size:14px;color:var(--muted);margin:0 0 18px;line-height:1.6}
+.tag{font:500 11px 'IBM Plex Mono',monospace;border-radius:4px;padding:3px 6px;letter-spacing:.5px}
+.tag.green{color:#0f7a58;background:#e7f8f0;border:1px solid #a7e3cc}
+.tag.blue{color:var(--blue);background:#eff6ff;border:1px solid #bfdbfe}
+.access-card ul{list-style:none;margin:0;padding:0;display:grid;gap:10px;font-size:14px;line-height:1.5}
+.access-card li{display:flex;gap:10px;align-items:baseline}
+.access-card li i{font-style:normal;font-weight:700;width:14px;flex:none;text-align:center}
+.access-card li i.y{color:#16a34a}
+.access-card li i.n{color:#b4bcc9}
+.access-card li.off{color:#8a94a5}
+.access-card code{font-size:12px;color:#1e40af}
+.access-foot{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:18px}
+.access-foot div{border:1px dashed #d6dce8;border-radius:10px;padding:18px 20px;font-size:14px;line-height:1.65;color:var(--muted)}
+.access-foot b{display:block;color:var(--ink);font-weight:600;margin-bottom:4px}
+.access-foot code{font-size:12px;color:#1e40af;word-break:break-all}
+.note a{color:#0f8a63;text-decoration:underline;text-underline-offset:2px}
+@media(max-width:900px){.access-foot{grid-template-columns:1fr}}
+@media(max-width:680px){.access{grid-template-columns:1fr}}
+
 .connect{display:grid;grid-template-columns:.85fr 1.15fr;gap:40px;align-items:start;padding:0 0 80px}
 .connect p{color:var(--muted);line-height:1.7;font-size:15px}
 .codebox{position:relative;border:1px solid #dde3ef;border-radius:9px;background:#fff;box-shadow:0 10px 25px #28375906;overflow:hidden}
@@ -2380,6 +2409,7 @@ h2{font-size:39px;font-weight:550;letter-spacing:-1.5px;margin:12px 0 0;line-hei
 .legend{font-size:13px!important}
 .legend a,.steps a{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
 .connect p code{font-size:12.5px;color:#1e40af}
+.connect a.inline{color:var(--blue);text-decoration:underline;text-underline-offset:2px}
 .faq-code{margin-top:14px}
 .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;line-height:16px}
 .tag.skill{color:#6d28d9;background:#f5f3ff;border:1px solid #ddd6fe}
@@ -2473,7 +2503,7 @@ footer{border-top:1px solid var(--line);padding:24px 0 30px;display:flex;justify
 .footerlinks a:hover{color:var(--blue)}
 
 @media(max-width:900px){h1{font-size:50px}.hero{gap:0}.node{padding:10px;font-size:12px}.hero-visual{transform:scale(.92)}.wrap{padding:0 24px}.workflow,.connect{gap:22px}.workflow{padding:28px}.lower{gap:40px}.features{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:680px){header{height:76px}nav{gap:15px}nav>a:not(.navcta){display:none}.logo small{display:none}.hero{grid-template-columns:1fr;padding-top:45px;gap:20px}h1{font-size:44px;letter-spacing:-2px}.hero-visual{height:380px;transform:none}.brands{flex-wrap:wrap;gap:20px;font-size:16px;justify-content:center}.section{padding:55px 0}.section-title{display:block}.section-title>p{margin-top:20px}.features,.workflow,.lower,.connect{grid-template-columns:1fr}.features{gap:12px}.workflow{padding:25px;margin-bottom:55px}.lower{gap:18px;padding-bottom:45px}.cta{display:block}.cta .btn{margin-top:15px}footer{gap:20px;flex-wrap:wrap}h2{font-size:31px}.note{font-size:11px}.terminal-body{font-size:11px;padding:15px}.n1{left:0}.n4{right:0}}
+@media(max-width:680px){header{height:76px}nav{gap:15px}nav>a:not(.navcta):not(.navpublic){display:none}.logo small{display:none}.hero{grid-template-columns:1fr;padding-top:45px;gap:20px}h1{font-size:44px;letter-spacing:-2px}.hero-visual{height:380px;transform:none}.brands{flex-wrap:wrap;gap:20px;font-size:16px;justify-content:center}.section{padding:55px 0}.section-title{display:block}.section-title>p{margin-top:20px}.features,.workflow,.lower,.connect{grid-template-columns:1fr}.features{gap:12px}.workflow{padding:25px;margin-bottom:55px}.lower{gap:18px;padding-bottom:45px}.cta{display:block}.cta .btn{margin-top:15px}footer{gap:20px;flex-wrap:wrap}h2{font-size:31px}.note{font-size:11px}.terminal-body{font-size:11px;padding:15px}.n1{left:0}.n4{right:0}}
 @media(max-width:420px){.node small{display:none}.hero-visual{height:340px}.core{width:124px;height:124px}.core img{width:48px;height:48px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
 """
@@ -2824,6 +2854,7 @@ async def _landing(request: Any) -> Any:
 <header>
   <a class="logo" href="#top" aria-label="BrainKB MCP home"><img src="/logo.png" alt="" width="40" height="40">BrainKB <small>MCP</small></a>
   <nav aria-label="Main navigation">
+    <a class="navpublic" href="#public"><i></i>Open knowledge<span class="np-extra"> · no login</span></a>
     <a href="#capabilities">Capabilities</a>
     <a href="#workflow">How it works</a>
     <a href="#questions">Questions</a>
@@ -2845,7 +2876,7 @@ async def _landing(request: Any) -> Any:
       <a class="btn primary" href="#connect">Connect your agent</a>
       <a class="btn" href="#workflow">See it in action</a>
     </div>
-    <div class="note">Public spaces readable with no sign-in. Per-caller identity. Provenance on every change.</div>
+    <div class="note"><a href="#public">Access open knowledge without login</a> · Per-caller identity · Provenance on every change</div>
   </div>
   <div class="hero-visual" aria-label="Diagram: BrainKB MCP connects your AI agent with BrainKB workspaces, the knowledge graph and provenance">
     <div class="orbit"></div><div class="orbit second"></div>
@@ -2869,6 +2900,49 @@ async def _landing(request: Any) -> Any:
   </div>
 </section>
 
+<section class="section public" id="public">
+  <div class="section-title">
+    <div><span class="eyebrow">Open knowledge · no login</span><h2>Access open knowledge.<br>No need to log in.</h2></div>
+    <p>Public spaces in BrainKB are open knowledge for everyone. Connect any MCP client
+    without logging in and your agent can browse, search and read them. It is <b>read-only</b>:
+    nothing can be added or changed without an account.</p>
+  </div>
+  <div class="access">
+    <div class="access-card open">
+      <h3>No login <span class="tag green">READ-ONLY</span></h3>
+      <p class="sub">Anyone, from any MCP client, with no token or account.</p>
+      <ul>
+        <li><i class="y">✓</i><span>List public spaces <code>brainkb_list_spaces</code></span></li>
+        <li><i class="y">✓</i><span>Search across public spaces <code>brainkb_search</code></span></li>
+        <li><i class="y">✓</i><span>Read a public space's RDF <code>brainkb_read_space</code></span></li>
+        <li class="off"><i class="n">✕</i><span>Private spaces never appear and can't be read</span></li>
+        <li class="off"><i class="n">✕</i><span>No ingest, edits, sharing, provenance, SPARQL or admin</span></li>
+      </ul>
+    </div>
+    <div class="access-card">
+      <h3>Logged in <span class="tag blue">YOUR ACCOUNT</span></h3>
+      <p class="sub">Everything on the left, plus what your role and memberships allow.</p>
+      <ul>
+        <li><i class="y">✓</i><span>Your own and shared private spaces</span></li>
+        <li><i class="y">✓</i><span>Create spaces, ingest RDF, share and publish</span></li>
+        <li><i class="y">✓</i><span>Provenance and triple-level change history</span></li>
+        <li><i class="y">✓</i><span>Ready-made questions and SPARQL (by role)</span></li>
+        <li><i class="y">✓</i><span>Admin tools, if you are authorized</span></li>
+      </ul>
+    </div>
+  </div>
+  <div class="access-foot">
+    <div><b>What "public" means</b>A space owner chose to publish it. Owners can switch a
+    space between public and private at any time; private data is never returned to
+    anyone who isn't a member.</div>
+    <div><b>How to connect without login</b>Add <code>https://{host}/mcp</code> to your
+    client and skip login. Then just ask: "What public spaces are in BrainKB?"</div>
+    <div><b>When you'll be asked to log in</b>Only when a request needs an account, such
+    as a private space or any change. Your agent says so, then starts the BrainKB
+    login.</div>
+  </div>
+</section>
+
 <section class="section" id="capabilities">
   <div class="section-title">
     <div><span class="eyebrow">Through MCP</span><h2>Less SPARQL.<br>More science.</h2></div>
@@ -2887,9 +2961,8 @@ async def _landing(request: Any) -> Any:
     <p>Point your client at <code>https://{host}/mcp</code> (streamable HTTP). Every call
     that needs an account runs as you: the client signs in with your own BrainKB account,
     never a shared one.</p>
-    <p><b>No sign-in needed to read public data.</b> Without an account, your agent can
-    list, search and read <b>public spaces</b> (read-only). Sign in to read your private
-    spaces, ingest, or use provenance, SPARQL and admin tools.</p>
+    <p><b>Just reading open knowledge?</b> No need to log in; see
+    <a class="inline" href="#public">Open knowledge</a>.</p>
     <p>Apps that connect by URL (Perplexity, claude.ai, ChatGPT) choose <b>OAuth</b> with no
     client ID or secret, then sign in on the BrainKB page that opens.</p>
     <p class="legend"><span class="ok">✓</span> tested with BrainKB · want the agent skill too? See <a href="#skill">Skill</a>.</p>
@@ -2931,8 +3004,8 @@ url = "https://{host}/mcp"</pre>
 3. Authentication  OAuth (leave client ID and secret empty)
 4. Sign in on the BrainKB page that opens, then allow access
 
-Only reading public spaces? Skip sign-in: list, search and
-read of public spaces work with no authentication (read-only).</pre>
+Only reading open knowledge? No need to log in: public
+spaces can be listed, searched and read with no authentication.</pre>
     </div>
     <div class="codebox" data-pane="cursor" hidden>
       <div class="codebox-head"><span>Cursor · ~/.cursor/mcp.json</span><button class="copy" type="button">Copy</button></div>
@@ -3091,13 +3164,20 @@ url = "https://{host}/mcp"</pre></div></div>
     Perplexity, claude.ai and ChatGPT connect to
     <code>https://{host}/mcp</code>, and your agent can then work with workspaces,
     ingest, search, ready-made questions and provenance on your behalf.</p></details>
+    <details open><summary>Do I need to log in?</summary><p>No, not to read open
+    knowledge. Without logging in, your agent can list, search and read every
+    <b>public</b> space; it is read-only, and private spaces stay hidden. You only need
+    to log in to read your private spaces or to change anything (create a space, ingest,
+    share), and for provenance, SPARQL and admin tools. See
+    <a href="#public">Open knowledge</a>.</p></details>
     <details><summary>Can I use BrainKB through skills?</summary><p>Yes. The
     <a href="https://github.com/sensein/agent_skills/tree/main/skills/brainkb" target="_blank" rel="noopener">BrainKB skill</a> works alongside
     this server: install it in your agent, and it guides the agent through sign-in,
     ingest, questions and provenance using the server's tools.</p></details>
     <details><summary>How does my agent sign in?</summary><p>With a personal access token
     sent as an <code>Authorization: Bearer</code> header, or through the Globus, ORCID or
-    GitHub login tools, which hand you a browser link. Every call runs as you.</p></details>
+    GitHub login tools, which hand you a browser link. Every call that needs an account
+    runs as you. Reading public spaces needs no login.</p></details>
     <details><summary>How do I add BrainKB to Perplexity, claude.ai or ChatGPT?</summary><p>Add
     a custom connector with the URL <code>https://{host}/mcp</code> and choose OAuth, leaving
     the client ID and secret empty. The app registers itself and opens a BrainKB sign-in
