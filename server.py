@@ -2851,11 +2851,11 @@ async def _landing(request: Any) -> Any:
 <header>
   <a class="logo" href="#top" aria-label="BrainKB MCP home"><img src="/logo.png" alt="" width="40" height="40">BrainKB <small>MCP</small></a>
   <nav aria-label="Main navigation">
-    <a class="navpublic" href="#public">Open knowledge</a>
     <a href="#capabilities">Capabilities</a>
+    <a class="navpublic" href="#public">Open knowledge</a>
+    <a href="#skill">Skill</a>
     <a href="#workflow">How it works</a>
     <a href="#questions">Questions</a>
-    <a href="#skill">Skill</a>
     <a class="btn navcta primary" href="#connect">Connect your agent</a>
   </nav>
 </header>
@@ -2894,6 +2894,17 @@ async def _landing(request: Any) -> Any:
     <span><em>≋</em> RDF graphs</span>
     <span><em>◈</em> Named entities</span>
     <span><em>↻</em> PROV-O provenance</span>
+  </div>
+</section>
+
+<section class="section" id="capabilities">
+  <div class="section-title">
+    <div><span class="eyebrow">Through MCP</span><h2>Less SPARQL.<br>More science.</h2></div>
+    <p>Ask in plain language and your agent picks the right BrainKB tools. Every action
+    runs as you, within your permissions.</p>
+  </div>
+  <div class="features">
+{features}
   </div>
 </section>
 
@@ -2937,17 +2948,6 @@ async def _landing(request: Any) -> Any:
     <div><b>When you'll be asked to log in</b>Only when a request needs an account, such
     as a private space or any change. Your agent says so, then starts the BrainKB
     login.</div>
-  </div>
-</section>
-
-<section class="section" id="capabilities">
-  <div class="section-title">
-    <div><span class="eyebrow">Through MCP</span><h2>Less SPARQL.<br>More science.</h2></div>
-    <p>Ask in plain language and your agent picks the right BrainKB tools. Every action
-    runs as you, within your permissions.</p>
-  </div>
-  <div class="features">
-{features}
   </div>
 </section>
 
