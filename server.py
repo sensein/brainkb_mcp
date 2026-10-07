@@ -349,6 +349,15 @@ class _NotAuthed(RuntimeError):
     pass
 
 
+class _NoCredentials(_NotAuthed):
+    """No credential of any kind was supplied (no header, session or env PAT).
+
+    Distinct from a credential that was supplied but failed (expired/revoked/bad):
+    only this case may fall back to an anonymous read of public content. A caller
+    whose token is broken must see the auth error, not silently get the anonymous
+    view (which looks like "your private space doesn't exist")."""
+
+
 # --------------------------------------------------------------------------- #
 # Backend URL allowlist (SSRF / credential-exfiltration guard)
 # --------------------------------------------------------------------------- #
@@ -711,7 +720,7 @@ def _token_for(audience: str) -> Dict[str, str]:
                     {"legacy_token": legacy, "email": em, "password": pw, "url": base})
             return {"url": base, "token": legacy, "email": em}
 
-    raise _NotAuthed(
+    raise _NoCredentials(
         "Not authenticated (or your session has expired — sessions don't last "
         "forever). Easiest: set BRAINKB_TOKEN to a Personal Access Token "
         "(brainkb_pat_...) in your config, or pass one with brainkb_use_token(pat) "
@@ -780,18 +789,53 @@ def _result(resp: httpx.Response) -> Any:
     return {"error": True, "status_code": resp.status_code, "detail": body}
 
 
+# The ONLY backend paths an unauthenticated caller may reach, all read-only GETs
+# the backend itself serves anonymously (public spaces). Anonymous access is
+# GET-only by construction (_post/_put/_delete/_um never fall back), and this
+# allowlist stops a future `anonymous=True` on any other path from widening it.
+_ANON_READ_PATHS = (
+    re.compile(r"^/api/spaces$"),
+    re.compile(r"^/api/spaces/[^/]+/data$"),
+    re.compile(r"^/api/search$"),
+)
+
+
+def _anon_read_ok(path: str) -> bool:
+    return any(rx.match(path) for rx in _ANON_READ_PATHS)
+
+
 def _get(path: str, params: Optional[Dict[str, Any]] = None, *,
-         allow_trailing_slash: bool = False) -> Any:
+         allow_trailing_slash: bool = False, anonymous: bool = False) -> Any:
+    """GET a query_service path as the caller.
+
+    anonymous=True is for endpoints the backend serves to unauthenticated callers
+    (public spaces: list, read, search). If the caller supplied NO credential, the
+    request goes out without an Authorization header and the backend returns only
+    public content. A credential that was supplied but failed still errors."""
     if not _path_ok(path, allow_trailing_slash=allow_trailing_slash):
         return dict(_BAD_PATH)
     if not _rate_ok("read", _RL_READ):
         return _rl_error("read", _RL_READ)
     try:
-        ctx = _resolve()
+        try:
+            ctx = _resolve()
+            headers = {"Authorization": f"Bearer {ctx['token']}"}
+            base, is_anon = ctx["url"], False
+        except _NoCredentials:
+            if not (anonymous and _anon_read_ok(path)):
+                raise
+            base = _allowed_base(_request_headers().get("x-brainkb-base-url"))
+            headers, is_anon = {}, True
         with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{ctx['url']}{path}", params=params or {},
-                         headers={"Authorization": f"Bearer {ctx['token']}"})
-        return _result(resp)
+            resp = c.get(f"{base}{path}", params=params or {}, headers=headers)
+        out = _result(resp)
+        if is_anon and isinstance(out, dict) and out.get("error") \
+                and resp.status_code in (401, 403):
+            out["anonymous"] = True
+            out["hint"] = ("Read anonymously (not logged in), so only public spaces "
+                           "are visible. Log in (brainkb_globus_login or a PAT) to "
+                           "read private spaces you are a member of.")
+        return out
     except _NotAuthed as e:
         return {"error": True, "detail": str(e)}
     except Exception as e:
@@ -1142,8 +1186,11 @@ def brainkb_list_spaces() -> Any:
       - can_write: their space role permits ingest (owner/editor) — a real ingest
                    also needs the 'ingest' capability + any per-space access rules.
     Use this to tell the user which spaces they can read vs. write vs. only see as
-    public."""
-    return _get("/api/spaces")
+    public.
+
+    No login needed: an unauthenticated caller gets the public spaces only
+    (read-only). Log in to also see your own/member spaces."""
+    return _get("/api/spaces", anonymous=True)
 
 
 @mcp.tool()
@@ -1753,18 +1800,20 @@ def brainkb_recover_job(job_id: str) -> Any:
 def brainkb_search(q: str, space: str = "", limit: int = 25, offset: int = 0) -> Any:
     """Full-text search over the knowledge graphs, access-filtered by space
     visibility. Pass `space` to scope to one workspace, omit for a full search.
+    No login needed: an unauthenticated caller searches public spaces only.
     Anonymous/other users never see private-space data."""
     params: Dict[str, Any] = {"q": q, "limit": limit, "offset": offset}
     if space:
         params["space"] = space
-    return _get("/api/search", params=params)
+    return _get("/api/search", params=params, anonymous=True)
 
 
 @mcp.tool()
 def brainkb_read_space(slug: str) -> Any:
     """Read all RDF (JSON-LD) in a space's graphs. Public spaces are readable by
-    anyone; private spaces require membership."""
-    return _get(f"/api/spaces/{_seg(slug)}/data")
+    anyone without logging in (read-only); private spaces require login and
+    membership. Don't ask the user to log in just to read a public space."""
+    return _get(f"/api/spaces/{_seg(slug)}/data", anonymous=True)
 
 
 @mcp.tool()

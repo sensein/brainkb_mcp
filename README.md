@@ -644,5 +644,13 @@ needed; the process talks to the query_service at `localhost:8010` directly.
 - Ingestion is submit-and-forget: tools return a `job_id`; poll `brainkb_job_status`.
 - Access control is enforced server-side: write requires space owner/editor; public
   spaces are readable anonymously; private-space data is never returned to non-members.
+- **Anonymous read (no login).** A caller with no credential at all (no
+  `Authorization` header, session login or `BRAINKB_TOKEN`) can still use
+  `brainkb_list_spaces`, `brainkb_search` and `brainkb_read_space`; they see
+  **public spaces only**. This is read-only by construction: only GETs to
+  `/api/spaces`, `/api/spaces/{slug}/data` and `/api/search` may go out without a
+  token (`_ANON_READ_PATHS`), and every write, admin, provenance and SPARQL tool
+  still requires login. A credential that is *supplied but invalid/expired* is an
+  error, never a silent fallback to the anonymous view.
 - Scopes: reads need `read`, ingest/space-mutations need `write`, `brainkb_sparql`
   needs `admin`.
