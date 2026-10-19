@@ -64,6 +64,15 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_list_jobs(limit?)` / `brainkb_job_status(job_id)` | Ingest status |
 | `brainkb_recover_job(job_id)` | Recover a stuck/errored job |
 
+### SynthScholar reviews
+Reviews live in ml_service (`BRAINKB_ML_URL`); every call runs as you, so only a review's owner (or an admin) can import, read or record it, and only someone who may write to a space can put a review there.
+
+| Tool | What it does |
+|------|--------------|
+| `brainkb_synthscholar_list_reviews()` | Your reviews: id, title, status, `source` (`pipeline` = run on BrainKB, `import` = a local run), `in_graph` |
+| `brainkb_synthscholar_import(output_dir)` | Import a local run's **output directory** (the folder holding `review.json`). Everything but intermediate work (`work/`, caches) is kept with the review: manuscript, PDF, figures, tables, RDF, search log, verification reports; what was left out is recorded. Created completed and **private**. Reads the MCP server's filesystem, so it follows the same rules as `brainkb_ingest_files` (`MCP_INGEST_ROOT`) |
+| `brainkb_synthscholar_add_to_graph(review_id, space_slug)` | Put a completed review's RDF into the knowledge graph: its own graph `https://brainkb.org/synthscholar/reviews/<id>/` is registered in the space (owner/editor), the Turtle (the run's `review.ttl` when imported, else the RDF export) is ingested as you → `job_id`, and the ingest is recorded in the review's provenance. Once per review |
+
 ### Read / search / provenance
 | Tool | What it does |
 |------|--------------|
@@ -150,7 +159,7 @@ backend. Three inputs are therefore treated as hostile:
 |-----|---------|----------------|
 | `MCP_ALLOWED_BASE_URLS` | *(only `BRAINKB_URL`)* | Backends a caller may select via the `X-BrainKB-Base-URL` header or a tool's `base_url` argument |
 | `MCP_TRUSTED_PROXIES` | *(empty)* | Peers whose `X-Forwarded-For` / `X-Real-IP` is believed |
-| `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` may read from |
+| `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` and `brainkb_synthscholar_import` may read from |
 | `MCP_UPLOAD_ENABLED` | `true` | `POST /upload` staging endpoint (authenticated) |
 | `MCP_UPLOAD_DIR` | `<tmp>/brainkb-uploads` | where staged uploads live |
 | `MCP_UPLOAD_MAX_BYTES` | `5000000000` | 5 GB per file |

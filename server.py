@@ -12,6 +12,8 @@ Transport: stdio (default). Run with:  python server.py
 
 Configuration (env, all optional):
   BRAINKB_URL       Base URL of the query_service (default http://localhost:8010)
+  BRAINKB_ML_URL    Base URL of ml_service, for SynthScholar reviews (default
+                    BRAINKB_URL with :8010 -> :8007)
   BRAINKB_TOKEN     A Personal Access Token (brainkb_pat_...) — the recommended
                     way to authenticate for LOCAL (stdio) use. Mint one with
                     brainkb_create_token() after logging in once, then paste it
@@ -1561,8 +1563,9 @@ def _upload_discard(upload_id: str) -> None:
             pass
 
 
-def _ingest_path(p: str) -> str:
+def _ingest_path(p: str, *, directory: bool = False) -> str:
     """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
+    directory=True expects a directory (a SynthScholar output folder) instead.
 
     realpath() first, so symlinks cannot point out of the configured root.
     """
@@ -1599,7 +1602,10 @@ def _ingest_path(p: str) -> str:
             "calls silently breaks blank nodes. brainkb_ingest_text is for RDF you "
             "authored in-session, and takes sha256= so even that is checked."
         )
-    if not os.path.isfile(rp):
+    if directory:
+        if not os.path.isdir(rp):
+            raise PermissionError(f"{p!r} is not a directory.")
+    elif not os.path.isfile(rp):
         raise PermissionError(f"{p!r} is not a regular file.")
     return rp
 
@@ -1832,6 +1838,193 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
                 fh.close()
             except Exception:
                 pass
+
+
+# --------------------------------------------------------------------------- #
+# SynthScholar reviews (ml_service)
+# --------------------------------------------------------------------------- #
+# Reviews live in ml_service; their RDF goes into a space's graph through
+# query_service. Every call runs as the caller (an ml_service-audience token for
+# the review, the query_service token for the space), so the same rules apply as
+# in the UI: only the review's owner (or an admin) can import, read or record it,
+# and only someone who may write to the space can put it there.
+
+_AUD_ML = "ml_service"
+_ML_URL = (os.getenv("BRAINKB_ML_URL") or _DEFAULT_URL.replace(":8010", ":8007")).rstrip("/")
+# What a local run's output directory keeps out of an import (the server decides
+# again; skipping here only avoids uploading intermediate work).
+_SS_SKIP_DIRS = {"work", ".git", "__pycache__", "node_modules", ".ipynb_checkpoints", ".venv"}
+_SS_SKIP_NAMES = {".DS_Store", "Thumbs.db"}
+_SS_MAX_FILES = 1000
+
+
+def _ml_base(base: str) -> str:
+    """ml_service base for a query_service base: BRAINKB_ML_URL for the default
+    backend, the :8010 -> :8007 dev pairing otherwise."""
+    base = _norm_base(base)
+    if base == _norm_base(_DEFAULT_URL):
+        return _ML_URL
+    if ":8010" in base:
+        return base.replace(":8010", ":8007")
+    raise _NotAuthed(f"No ml_service URL is known for backend {base!r}; set BRAINKB_ML_URL.")
+
+
+def _ml(method: str, path: str, *, timeout: Optional[httpx.Timeout] = None, raw: bool = False, **kw) -> Any:
+    """Call ml_service's /api/synth-scholar as the caller."""
+    if not _path_ok(path):
+        return dict(_BAD_PATH)
+    if not _rate_ok("write" if method != "GET" else "read", _RL_WRITE if method != "GET" else _RL_READ):
+        return _rl_error("write" if method != "GET" else "read", _RL_WRITE if method != "GET" else _RL_READ)
+    try:
+        ctx = _token_for(_AUD_ML)
+        with httpx.Client(timeout=timeout or _TIMEOUT) as c:
+            resp = c.request(method, f"{_ml_base(ctx['url'])}/api/synth-scholar{path}",
+                             headers={"Authorization": f"Bearer {ctx['token']}"}, **kw)
+        if raw and resp.status_code < 400:
+            return resp
+        return _result(resp)
+    except _NotAuthed as e:
+        return {"error": True, "detail": str(e)}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+
+
+@mcp.tool()
+def brainkb_synthscholar_list_reviews() -> Any:
+    """Your SynthScholar reviews (admins: all): id, title, status, whether it was
+    run here or imported (`source`), and whether it is already in the knowledge
+    graph (`in_graph`)."""
+    out = _ml("GET", "/reviews")
+    if isinstance(out, list):
+        return [{k: r.get(k) for k in ("review_id", "title", "status", "source", "in_graph",
+                                       "is_public", "included_count", "created_at", "completed_at")}
+                for r in out]
+    return out
+
+
+@mcp.tool()
+def brainkb_synthscholar_import(output_dir: str) -> Any:
+    """Import a locally-run SynthScholar review from its output directory (the
+    folder holding review.json, as the synthscholar skill writes it).
+
+    Everything but intermediate work (work/, caches) is uploaded and kept with the
+    review: manuscript, PDF, figures, tables, RDF, search log and verification
+    reports. What is left out is recorded too. The review is created completed and
+    PRIVATE, owned by you; publish it in the UI. To put its RDF into a space's graph,
+    follow with brainkb_synthscholar_add_to_graph. Reads the MCP server's filesystem,
+    so it is only available where file ingest is (local server or MCP_INGEST_ROOT)."""
+    try:
+        root = _ingest_path(output_dir, directory=True)
+    except PermissionError as e:
+        return {"error": True, "status_code": 403, "detail": str(e)}
+    if not os.path.isfile(os.path.join(root, "review.json")):
+        return {"error": True, "detail": f"{output_dir!r} has no review.json — pass the run's output directory."}
+    keep, left_out = [], []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+        top = rel_dir.split("/")[0] if rel_dir else ""
+        for name in sorted(filenames):
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            if name in _SS_SKIP_NAMES:
+                continue
+            if any(part in _SS_SKIP_DIRS for part in rel_dir.split("/") if part):
+                left_out.append({"path": rel, "reason": f"intermediate files ({top}/)"})
+                continue
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full) or not os.path.realpath(full).startswith(root + os.sep):
+                continue
+            keep.append((rel, full))
+    if len(keep) > _SS_MAX_FILES:
+        return {"error": True, "detail": f"The review has {len(keep)} files; at most {_SS_MAX_FILES} can be imported."}
+    handles = []
+    try:
+        files = []
+        for rel, full in keep:
+            fh = open(full, "rb")
+            handles.append(fh)
+            files.append(("files", (rel, fh, "application/octet-stream")))
+        out = _ml("POST", "/reviews/import", files=files,
+                  data={"left_out": jsonlib.dumps(left_out[:5000])} if left_out else None,
+                  timeout=_UPLOAD_TIMEOUT)
+    finally:
+        for fh in handles:
+            try:
+                fh.close()
+            except Exception:
+                pass
+    if isinstance(out, dict) and not out.get("error"):
+        origin = (out.get("provenance") or {}).get("origin") or {}
+        return {"review_id": out.get("review_id"), "title": out.get("title"), "status": out.get("status"),
+                "is_public": out.get("is_public"), "files_kept": len(out.get("artifacts") or []),
+                "left_out": len(origin.get("skipped") or []),
+                "next": "brainkb_synthscholar_add_to_graph(review_id, space_slug) to put its RDF in a space"}
+    return out
+
+
+@mcp.tool()
+def brainkb_synthscholar_add_to_graph(review_id: str, space_slug: str) -> Any:
+    """Put a completed SynthScholar review's RDF into the knowledge graph, in a
+    space you may write to (see brainkb_list_writable_spaces).
+
+    The review gets its own graph, https://brainkb.org/synthscholar/reviews/<id>/
+    (<id> is the review's own id — review_local_… for a local run),
+    registered in the space (owner/editor of the space); the Turtle — the run's own
+    review.ttl when imported, else the RDF export — is ingested as you, and the
+    ingest is recorded in the review's provenance. A review goes in once (its graph
+    is append-only). Returns the ingest job_id (poll brainkb_job_status)."""
+    status = _ml("GET", f"/reviews/{_seg(review_id)}/status")
+    if isinstance(status, dict) and status.get("error"):
+        return status
+    if status.get("status") != "completed":
+        return {"error": True, "detail": "Only a completed review can go into the knowledge graph."}
+    if status.get("in_graph"):
+        return {"error": True, "status_code": 409, "detail": "This review is already in the knowledge graph."}
+    ttl, source_file = None, "review.ttl"
+    arts = _ml("GET", f"/reviews/{_seg(review_id)}/artifacts")
+    if isinstance(arts, list) and any(a.get("path") == "review.ttl" for a in arts):
+        r = _ml("GET", f"/reviews/{_seg(review_id)}/artifacts/review.ttl", raw=True, params={"download": "true"})
+        if isinstance(r, httpx.Response):
+            ttl = r.content
+    if not ttl:
+        r = _ml("GET", f"/reviews/{_seg(review_id)}/export", raw=True, params={"format": "ttl"},
+                timeout=_UPLOAD_TIMEOUT)
+        if not isinstance(r, httpx.Response):
+            return r
+        ttl, source_file = r.content, "export.ttl"
+    # ml_service names the graph: https://brainkb.org/synthscholar/reviews/<the
+    # review's own id>/ — for an import, the id the local run gave it.
+    graph = status.get("graph_iri")
+    if not graph:
+        return {"error": True, "detail": "ml_service did not name the review's graph (older ml_service?)."}
+    # The same local run imported twice is two reviews with one graph, and
+    # re-registering a graph in the same space succeeds quietly — so a registered
+    # graph means this review's RDF is (or is being) in the graph already.
+    registry = _get("/api/query/registered-named-graphs")
+    bare = graph.rstrip("/")
+    text = jsonlib.dumps(registry)
+    if f'"{bare}/"' in text or f'"{bare}"' in text:
+        return {"error": True, "status_code": 409,
+                "detail": f"{graph} is already registered — this review was ingested before "
+                          "(possibly from another import of the same run)."}
+    reg = _post(f"/api/spaces/{_seg(space_slug)}/graphs",
+                json={"named_graph_url": graph,
+                      "description": f"SynthScholar review: {str(status.get('title') or review_id)[:200]}"})
+    if isinstance(reg, dict) and reg.get("error"):
+        return {**reg, "step": "register the review's graph in the space"}
+    job = _post("/api/insert/files/knowledge-graph-triples",
+                params={"user_id": _me(), "named_graph_iri": graph},
+                files=[("files", (f"{review_id}.ttl", ttl, "text/turtle"))], timeout=_UPLOAD_TIMEOUT)
+    if isinstance(job, dict) and job.get("error"):
+        return {**job, "step": "ingest"}
+    rec = _ml("POST", f"/reviews/{_seg(review_id)}/graph-ingests",
+              json={"space_slug": space_slug, "graph_iri": graph, "job_id": (job or {}).get("job_id"),
+                    "source_file": source_file, "sha256": hashlib.sha256(ttl).hexdigest()})
+    out = {"review_id": review_id, "space_slug": space_slug, "graph_iri": graph,
+           "job_id": (job or {}).get("job_id"), "triples_file_bytes": len(ttl)}
+    if isinstance(rec, dict) and rec.get("error"):
+        out["warning"] = f"Ingested, but the review could not record it: {rec.get('detail')}"
+    return out
 
 
 # --------------------------------------------------------------------------- #
