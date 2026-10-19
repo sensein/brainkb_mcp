@@ -48,6 +48,7 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_create_space(..., parent_slug=…)` | Create a **subspace** (any depth). Needs manage rights on the parent; parent members get the same roles in it |
 | `brainkb_get_space(slug)` | One space's details: graphs, members (direct and inherited), parent, ancestors, subspaces, your role |
 | `brainkb_space_tree(slug)` | A space and all its subspaces, nested, with your role in each |
+| `brainkb_list_writable_spaces()` | Spaces you can ingest into (same checks as ingestion), with their graphs; use it to pick an ingest target |
 | `brainkb_add_space_member(slug, email, role)` | Manage members (owner/manager) |
 | `brainkb_add_space_graph(slug, graph_iri, description?)` | Register + bind a graph to a space |
 | `brainkb_delete_space(slug, confirm_slug)` | **SuperAdmin only, irreversible.** Delete a space and everything in it: its graphs, their ingestion-history (delta) graphs, registry entries, members, access rules and search entries. The deletion is recorded in provenance. `confirm_slug` must equal `slug` |

@@ -1882,6 +1882,17 @@ def brainkb_read_space(slug: str) -> Any:
 
 
 @mcp.tool()
+def brainkb_list_writable_spaces() -> Any:
+    """Spaces the caller can ingest into, each with its graphs (and descriptions) and
+    `parent_slug` for subspaces — decided by the same checks ingestion uses: owner/
+    editor membership (including a role inherited from a parent space), a space write
+    access rule, or Admin/SuperAdmin. `can_ingest` false means the caller has no
+    write-capable role at all. `unmapped_graphs` are registered graphs in no space.
+    Use this, not brainkb_list_registered_graphs, to choose where to ingest."""
+    return _get("/api/spaces/writable")
+
+
+@mcp.tool()
 def brainkb_list_registered_graphs() -> Any:
     """List registered named graphs visible to the caller (private-space graphs the
     caller can't access are hidden)."""
