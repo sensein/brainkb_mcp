@@ -129,6 +129,7 @@ register(QAQuery(
     example={"limit": 100},
     sparql="""
 PREFIX dcat: <http://www.w3.org/ns/dcat#>
+PREFIX bkr:  <https://brainkb.org/resource/>
 PREFIX ner:  <https://brainkb.org/ner/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 
@@ -140,7 +141,7 @@ WHERE {
   GRAPH ?resourceGraph {
     ?record a dcat:CatalogRecord ;
             prov:hadPrimarySource ?paper ;
-            <https://brainkb.org/resource/describesResource> ?resource .
+            bkr:describesResource ?resource .
   }
   GRAPH ?entityGraph {
     ?entity a ner:NamedEntity ;
@@ -285,6 +286,7 @@ register(QAQuery(
     ),
     example={"limit": 200},
     sparql="""
+PREFIX bkr:  <https://brainkb.org/resource/>
 PREFIX ner:  <https://brainkb.org/ner/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 
@@ -311,7 +313,7 @@ WHERE {
     FILTER NOT EXISTS {
       GRAPH {{resource_graph}} {
         ?rec prov:hadPrimarySource ?paper ;
-             <https://brainkb.org/resource/describesResource> ?r .
+             bkr:describesResource ?r .
       }
     }
     BIND("resources" AS ?missingSide)
