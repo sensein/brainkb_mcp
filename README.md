@@ -70,8 +70,16 @@ A SynthScholar run's output directory is ingested like any other data — into a
 | Tool | What it does |
 |------|--------------|
 | `brainkb_synthscholar_ingest(output_dir, space_slug)` | Ingest a run's **output directory** (holding `review.json` and `review.ttl`) into a space (owner/editor). Its graph `https://brainkb.org/synthscholar/reviews/<protocol.review_id>/` is registered in the space; `review.ttl` plus an import record (PROV-O: who, when, every kept file with media type, size, sha256, what was left out) are ingested as a job → `job_id`. Everything but `work/` is kept for the review's page. Once per review (409 after). Reads the MCP server's filesystem, like `brainkb_ingest_files` (`MCP_INGEST_ROOT`) |
-| `brainkb_synthscholar_list_reviews(space?)` | Ingested reviews you can read (public spaces: anyone) |
+| `brainkb_synthscholar_list_reviews(space?, q?)` | Ingested reviews you can read (public spaces: anyone); `q` matches title or research question |
 | `brainkb_synthscholar_get_review(review_id)` | One review: graph, space, files kept, the run's search log and verification, screening basis, full-text retrieval |
+| `brainkb_synthscholar_studies(review_id, q?, full_text?, source?, rob?, year_from?, year_to?, with_abstract?)` | Included studies, filtered — e.g. read from the abstract only (`full_text=false`), via EZproxy, high risk of bias |
+| `brainkb_synthscholar_screening(review_id, stage?, decision?, assessed_on?, reason?, q?, pmid?)` | The screening audit trail, filtered, with counts by stage/decision, what decisions were judged on, and exclusion reasons by criterion (`EC2` …) |
+| `brainkb_synthscholar_evidence(review_id, q?, claim?, pmid?, grounded?)` | Evidence spans behind the review's claims, and whether each quote was matched in the source |
+| `brainkb_synthscholar_records(review_id, kind, q?, study?, fields?)` | Per-study `charting` answers, critical `appraisal` by domain, or `narrative` rows; `q` searches the answers (e.g. "neo4j") |
+| `brainkb_synthscholar_text(review_id, section?)` | The review's own text: abstract, introduction, synthesis, bias, limitations, conclusions, search queries, per-group analysis |
+| `brainkb_synthscholar_find_study(doi?, pmid?, title?)` | Which reviews you can read include or screened a study, and what happened to it in each |
+
+All of these read under the space's rules (public spaces need no login) and are paged (`total`, ≤200 per call).
 
 ### Read / search / provenance
 | Tool | What it does |
