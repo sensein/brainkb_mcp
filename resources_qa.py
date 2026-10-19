@@ -47,9 +47,12 @@ CATEGORY = register_category(
     "resources named but never described). "
     "Compare what different papers claim about the same resource, and join a "
     "paper's resources to the named entities extracted from it. "
-    "Track maintenance from activity checks against code hosts and package "
-    "registries: current activity status (active, stale, inactive, archived, "
-    "deprecated, unavailable), last commit/release dates, status history and "
+    "Track maintenance from provenance-tracked activity assessments (when, by "
+    "which checker version, from which queries) against code hosts and package "
+    "registries, ontology registries (OBO Foundry, OLS), RRIDs and data archives "
+    "(GEO): current activity status (active, stale, inactive, archived, "
+    "deprecated, unavailable, unknown; datasets: available, embargoed), last "
+    "commit/release dates, status history and "
     "changes, drift between the version a paper states and what the registry "
     "shows today, and resources never checked. "
     "Every query reads one named graph, given by its optional `graph` "
@@ -2228,43 +2231,56 @@ LIMIT {{limit}}
 register(QAQuery(
     id="rs_activity_status",
     category=CATEGORY,
-    question="What is the current activity status of each resource?",
+    question="What is the current activity status of each resource, and which resources have a given status?",
     notes=(
         "Use for 'Is this tool still maintained?', 'When was X last active?', "
         "'What is the activity status of the resources in this graph?'. Reads "
         "only the latest activity check per resource. "
+        "Also use for 'Give me the archived / inactive / stale resources', 'Which "
+        "datasets are embargoed?', 'List active tools'. "
         "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
-        "name (resolve with rs_find_resource); omit for every resource. "
-        "Returns ?resource, ?name, ?status (e.g. 'active', 'stale', 'inactive', "
-        "'archived', 'deprecated', 'unavailable'), ?lastActivity (latest commit, "
-        "release or package upload; may be unbound) and ?checkedOn (when the "
-        "check ran). Resources never checked do not appear — see "
+        "name (resolve with rs_find_resource); omit for every resource. `status`, "
+        "one status or a comma-separated list (e.g. 'archived' or "
+        "'inactive,stale'); case-insensitive; omit for every status. "
+        "Returns ?resource, ?name, ?status (code and ontologies: 'active', 'stale', "
+        "'inactive', 'archived', 'deprecated', 'unavailable', 'unknown' when no "
+        "source gave a date; datasets: 'available' or 'embargoed' — a dataset is "
+        "not stale for being unchanged), ?lastActivity (latest commit, release, "
+        "package upload or dataset update; may be unbound), ?checkedOn (when the "
+        "assessment was made: prov:generatedAtTime, a full timestamp; a date only "
+        "for checks recorded before provenance tracking) and ?assessment (pass to "
+        "rs_activity_provenance for who/when/from where) and ?reason (why it got "
+        "that status: the rule and the evidence). Resources never checked do not appear — see "
         "rs_unchecked_resources. Limit defaults to 1000 rows. Scoped to the "
         "named graph given by `graph`."
     ),
-    example={"name": "", "limit": 1000},
+    example={"name": "", "status": "", "limit": 1000},
     sparql="""
 PREFIX bkr: <https://brainkb.org/resource/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 
-SELECT ?resource ?name ?status ?lastActivity ?checkedOn
+SELECT ?resource ?name ?status ?lastActivity ?checkedOn ?assessment ?reason
 WHERE {
   VALUES ?requestedName { {{name}} }
+  VALUES ?requestedStatus { {{status}} }
 
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
-              bkr:hasActivityCheck ?check .
-    ?check prov:endedAtTime ?checkedOn ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
            bkr:activityStatus ?statusIRI .
-    OPTIONAL { ?check bkr:lastActivityDate ?lastActivity }
+    OPTIONAL { ?assessment bkr:lastActivityDate ?lastActivity }
+    OPTIONAL { ?assessment bkr:statusReason ?reason }
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?newer .
-      ?newer prov:endedAtTime ?newerDate .
-      FILTER(?newerDate > ?checkedOn)
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
     }
   }
   BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
   FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+  FILTER(?requestedStatus = "" ||
+         CONTAINS(CONCAT(",", REPLACE(LCASE(?requestedStatus), " ", ""), ","), CONCAT(",", ?status, ",")))
 }
 ORDER BY ?status ?name
 LIMIT {{limit}}
@@ -2274,6 +2290,13 @@ LIMIT {{limit}}
             "name",
             "string",
             "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "status",
+            "string",
+            "Optional status or comma-separated statuses: active, stale, inactive, archived, deprecated, "
+            "unavailable, unknown, available, embargoed. Omit for all.",
             default="",
         ),
         QAParam(
@@ -2310,7 +2333,9 @@ register(QAQuery(
         "Use for 'Which tools are abandoned?', 'Which resources are archived or "
         "deprecated?', 'Is anything in this catalogue unmaintained?'. Reads only "
         "the latest activity check per resource and keeps statuses 'stale', "
-        "'inactive', 'archived', 'deprecated' and 'unavailable'. "
+        "'inactive', 'archived', 'deprecated' and 'unavailable' ('inactive' "
+        "includes ontologies OBO Foundry lists as inactive or orphaned). Datasets "
+        "('available', 'embargoed') and 'unknown' are not included. "
         "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
         "name; omit for every resource. "
         "Returns ?resource, ?name, ?status, ?lastActivity (may be unbound) and "
@@ -2328,14 +2353,14 @@ WHERE {
 
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
-              bkr:hasActivityCheck ?check .
-    ?check prov:endedAtTime ?checkedOn ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
            bkr:activityStatus ?statusIRI .
-    OPTIONAL { ?check bkr:lastActivityDate ?lastActivity }
+    OPTIONAL { ?assessment bkr:lastActivityDate ?lastActivity }
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?newer .
-      ?newer prov:endedAtTime ?newerDate .
-      FILTER(?newerDate > ?checkedOn)
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
     }
   }
   BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
@@ -2404,13 +2429,13 @@ WHERE {
 
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
-              bkr:hasActivityCheck ?check .
-    ?check prov:endedAtTime ?checkedOn ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
            bkr:lastActivityDate ?lastActivity .
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?newer .
-      ?newer prov:endedAtTime ?newerDate .
-      FILTER(?newerDate > ?checkedOn)
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
     }
   }
   # Compare the YYYY-MM-DD prefix, so xsd:date and xsd:dateTime values both work.
@@ -2478,13 +2503,13 @@ PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?status (COUNT(DISTINCT ?resource) AS ?resources)
 WHERE {
   GRAPH {{graph}} {
-    ?resource bkr:hasActivityCheck ?check .
-    ?check prov:endedAtTime ?checkedOn ;
+    ?resource bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
            bkr:activityStatus ?statusIRI .
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?newer .
-      ?newer prov:endedAtTime ?newerDate .
-      FILTER(?newerDate > ?checkedOn)
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
     }
   }
   BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
@@ -2531,9 +2556,15 @@ register(QAQuery(
         "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
         "name; omit for every resource. "
         "Returns ?resource, ?name, ?source (code host or registry, e.g. "
-        "'github', 'pypi'), ?checkedURL, ?lastCommit, ?lastRelease, "
-        "?latestVersion, ?archived, ?deprecated, ?available and ?note; any but "
-        "the first four may be unbound when the source did not report it. "
+        "'github', 'pypi', 'bioconductor', 'obofoundry', 'ols', 'rrid', 'geo'), "
+        "?checkedURL, ?lastCommit, ?lastRelease, ?latestVersion, ?archived, "
+        "?deprecated, ?available, ?embargoed (datasets), ?answeredAt (when the "
+        "source answered), ?decided (true when this signal decided the status), "
+        "?declaredStatus (a "
+        "registry's curated status, e.g. OBO Foundry 'inactive') and ?note "
+        "(says 'matched by title' or similar when the source was found from the "
+        "resource's name); any but the first four may be unbound when the source "
+        "did not report it. "
         "Limit defaults to 1000 rows. Scoped to the named graph given by `graph`."
     ),
     example={"name": "", "limit": 1000},
@@ -2543,15 +2574,15 @@ PREFIX prov: <http://www.w3.org/ns/prov#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT ?resource ?name ?source ?checkedURL ?lastCommit ?lastRelease ?latestVersion
-       ?archived ?deprecated ?available ?note
+       ?archived ?deprecated ?available ?embargoed ?answeredAt ?decided ?declaredStatus ?note
 WHERE {
   VALUES ?requestedName { {{name}} }
 
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
-              bkr:hasActivityCheck ?check .
-    ?check prov:endedAtTime ?checkedOn ;
-           bkr:hasActivitySignal ?signal .
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           prov:wasDerivedFrom ?signal .
     ?signal bkr:activitySource ?sourceIRI ;
             bkr:checkedURL ?checkedURL .
     OPTIONAL { ?signal bkr:lastCommitDate ?lastCommit }
@@ -2560,11 +2591,15 @@ WHERE {
     OPTIONAL { ?signal bkr:isArchived ?archived }
     OPTIONAL { ?signal bkr:isDeprecated ?deprecated }
     OPTIONAL { ?signal bkr:isAvailable ?available }
+    OPTIONAL { ?signal bkr:isEmbargoed ?embargoed }
+    OPTIONAL { ?signal prov:generatedAtTime ?answeredAt }
+    BIND(EXISTS { ?assessment bkr:statusDecidedBy ?signal } AS ?decided)
+    OPTIONAL { ?signal bkr:declaredActivityStatus ?declaredStatus }
     OPTIONAL { ?signal rdfs:comment ?note }
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?newer .
-      ?newer prov:endedAtTime ?newerDate .
-      FILTER(?newerDate > ?checkedOn)
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
     }
   }
   BIND(STRAFTER(STR(?sourceIRI), "/activity-source/") AS ?source)
@@ -2631,10 +2666,10 @@ WHERE {
 
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
-              bkr:hasActivityCheck ?check .
-    ?check prov:endedAtTime ?checkedOn ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
            bkr:activityStatus ?statusIRI .
-    OPTIONAL { ?check bkr:lastActivityDate ?lastActivity }
+    OPTIONAL { ?assessment bkr:lastActivityDate ?lastActivity }
   }
   BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
   FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
@@ -2702,14 +2737,14 @@ WHERE {
 
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
-              bkr:hasActivityCheck ?prev, ?curr .
-    ?prev prov:endedAtTime ?previousCheck ; bkr:activityStatus ?prevIRI .
-    ?curr prov:endedAtTime ?currentCheck ; bkr:activityStatus ?currIRI .
-    FILTER(?previousCheck < ?currentCheck && ?prevIRI != ?currIRI)
+              bkr:hasActivityAssessment ?prev, ?curr .
+    ?prev prov:generatedAtTime ?previousCheck ; bkr:activityStatus ?prevIRI .
+    ?curr prov:generatedAtTime ?currentCheck ; bkr:activityStatus ?currIRI .
+    FILTER(STR(?previousCheck) < STR(?currentCheck) && ?prevIRI != ?currIRI)
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?between .
-      ?between prov:endedAtTime ?d .
-      FILTER(?d > ?previousCheck && ?d < ?currentCheck)
+      ?resource bkr:hasActivityAssessment ?between .
+      ?between prov:generatedAtTime ?d .
+      FILTER(STR(?d) > STR(?previousCheck) && STR(?d) < STR(?currentCheck))
     }
   }
   BIND(STRAFTER(STR(?prevIRI), "/activity-status/") AS ?previousStatus)
@@ -2786,17 +2821,17 @@ WHERE {
   GRAPH {{graph}} {
     ?resource bkr:resourceName ?name ;
               bkr:hasVersion ?version ;
-              bkr:hasActivityCheck ?check .
+              bkr:hasActivityAssessment ?assessment .
     ?version bkr:versionIdentifier ?paperStatedVersion .
     OPTIONAL { ?version bkr:lifecycleStatus ?lc }
     OPTIONAL { ?version prov:hadPrimarySource ?paper . OPTIONAL { ?paper ner:title ?title } }
-    ?check prov:endedAtTime ?checkedOn ;
+    ?assessment prov:generatedAtTime ?checkedOn ;
            bkr:activityStatus ?statusIRI .
-    OPTIONAL { ?check bkr:hasActivitySignal ?s . ?s bkr:latestVersion ?latestVersion }
+    OPTIONAL { ?assessment prov:wasDerivedFrom ?s . ?s bkr:latestVersion ?latestVersion }
     FILTER NOT EXISTS {
-      ?resource bkr:hasActivityCheck ?newer .
-      ?newer prov:endedAtTime ?newerDate .
-      FILTER(?newerDate > ?checkedOn)
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
     }
   }
   BIND(STRAFTER(STR(?lc), "/lifecycle-status/") AS ?paperLifecycle)
@@ -2868,7 +2903,7 @@ WHERE {
     { ?resource dcterms:identifier ?id FILTER(STRSTARTS(STR(?id), "mentioned/")) }
     ?resource bkr:resourceName ?name .
     OPTIONAL { ?resource bkr:accessURL ?url }
-    FILTER NOT EXISTS { ?resource bkr:hasActivityCheck ?check }
+    FILTER NOT EXISTS { ?resource bkr:hasActivityAssessment ?assessment }
     BIND(NOT EXISTS { ?resource bkr:hasRecord ?rec } AS ?stub)
   }
 }
@@ -2895,4 +2930,122 @@ LIMIT {{limit}}
 
 ################################################################################
 # End CQ35
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ36 — Provenance of activity assessments
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_provenance",
+    category=CATEGORY,
+    question="When was each activity assessment made, by which software version, and from which sources and queries?",
+    notes=(
+        "Use for 'When was X last checked?', 'Which version of the checker produced "
+        "this status?', 'Where did this date come from?', 'Show the provenance of "
+        "this assessment'. Follows the PROV / NIDM-style chain: an "
+        "ActivityAssessment (cf. nidm:AcquisitionObject) prov:wasGeneratedBy an "
+        "ActivityCheck (cf. nidm:Acquisition) that is dcterms:isPartOf an "
+        "ActivityCheckRun (cf. nidm:Session), associated with a prov:SoftwareAgent "
+        "carrying its NIDM software version; the assessment prov:wasDerivedFrom "
+        "one signal per source, each with the time the answer arrived and the API "
+        "URLs queried (prov:hadPrimarySource). "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; `latest`, 1 (default) for each resource's latest assessment only, 0 "
+        "for every assessment. "
+        "Also answers 'How was the status reached?' (?reason, and ?decided on the "
+        "signals that decided it) and 'Which run, with which thresholds?'. "
+        "Returns ?resource, ?name, ?assessment, ?assessedAt, ?status, ?reason, "
+        "?check, ?checkStarted, ?checkEnded, ?run, ?runStarted, ?runEnded, "
+        "?staleAfterDays, ?inactiveAfterDays, ?agent, ?softwareVersion, ?signal, "
+        "?source, ?decided, ?answeredAt and ?queried (one row per URL queried). Checks "
+        "recorded before provenance tracking have a date-only ?assessedAt and no "
+        "run, start time or software version. Limit defaults to 1000 rows. Scoped "
+        "to the named graph given by `graph`."
+    ),
+    example={"name": "", "latest": 1, "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX nidm: <http://purl.org/nidash/nidm#>
+
+SELECT ?resource ?name ?assessment ?assessedAt ?status ?reason ?check ?checkStarted ?checkEnded
+       ?run ?runStarted ?runEnded ?staleAfterDays ?inactiveAfterDays ?agent ?softwareVersion
+       ?signal ?source ?decided ?answeredAt ?queried
+WHERE {
+  VALUES ?requestedName { {{name}} }
+  VALUES ?latest { {{latest}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?assessedAt ;
+                bkr:activityStatus ?statusIRI ;
+                prov:wasGeneratedBy ?check .
+    OPTIONAL { ?assessment bkr:statusReason ?reason }
+    OPTIONAL { ?assessment bkr:staleAfterDays ?staleAfterDays }
+    OPTIONAL { ?assessment bkr:inactiveAfterDays ?inactiveAfterDays }
+    OPTIONAL { ?check prov:startedAtTime ?checkStarted }
+    OPTIONAL { ?check prov:endedAtTime ?checkEnded }
+    OPTIONAL { ?check dcterms:isPartOf ?run .
+               OPTIONAL { ?run prov:startedAtTime ?runStarted }
+               OPTIONAL { ?run prov:endedAtTime ?runEnded } }
+    OPTIONAL { ?check prov:wasAssociatedWith ?agent .
+               OPTIONAL { ?agent nidm:NIDM_0000122 ?softwareVersion } }
+    OPTIONAL {
+      ?assessment prov:wasDerivedFrom ?signal .
+      OPTIONAL { ?signal bkr:activitySource ?sourceIRI }
+      OPTIONAL { ?signal prov:generatedAtTime ?answeredAt }
+      OPTIONAL { ?signal prov:hadPrimarySource ?queried }
+      BIND(EXISTS { ?assessment bkr:statusDecidedBy ?signal } AS ?decided)
+    }
+    FILTER(?latest = 0 || NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?assessedAt))
+    })
+  }
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
+  BIND(STRAFTER(STR(?sourceIRI), "/activity-source/") AS ?source)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?name DESC(?assessedAt) ?source ?queried
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "latest",
+            "int",
+            "1 for each resource's latest assessment only, 0 for every assessment.",
+            default=1,
+            minimum=0,
+            maximum=1,
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ36
 ################################################################################
