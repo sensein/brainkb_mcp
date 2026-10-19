@@ -882,15 +882,17 @@ def _patch(path: str, json: Any = None) -> Any:
         return {"error": True, "detail": str(e)}
 
 
-def _delete(path: str) -> Any:
+def _delete(path: str, params: Optional[Dict[str, Any]] = None,
+            timeout: Optional[httpx.Timeout] = None) -> Any:
     if not _path_ok(path):
         return dict(_BAD_PATH)
     if not _rate_ok("write", _RL_WRITE):
         return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.delete(f"{ctx['url']}{path}", headers={"Authorization": f"Bearer {ctx['token']}"})
+        with httpx.Client(timeout=timeout or _TIMEOUT) as c:
+            resp = c.delete(f"{ctx['url']}{path}", params=params,
+                            headers={"Authorization": f"Bearer {ctx['token']}"})
         return _result(resp)
     except _NotAuthed as e:
         return {"error": True, "detail": str(e)}
@@ -1220,6 +1222,28 @@ def brainkb_set_space_visibility(slug: str, visibility: str) -> Any:
     """Set a space 'public' (anyone, even anonymous, can read) or 'private'
     (members only). Owner only."""
     return _patch(f"/api/spaces/{_seg(slug)}/visibility", json={"visibility": visibility})
+
+
+@mcp.tool()
+def brainkb_delete_space(slug: str, confirm_slug: str) -> Any:
+    """PERMANENTLY delete a space and everything in it. SuperAdmin only; irreversible.
+
+    Drops the space's named graphs and the ingestion-history (delta) graphs that
+    hold copies of their data, removes the graphs' registry entries and the space's
+    RDF manifest, and deletes the space with its members, access rules and search
+    entries. The deletion itself is kept in the provenance graph (who, when, which
+    graphs: prov:invalidated). `confirm_slug` must equal `slug`.
+
+    Before calling: show the user the space (brainkb_read_space or
+    brainkb_list_spaces) and what will be lost, and get their explicit
+    confirmation in this conversation. Never call it to tidy up on your own
+    initiative. A non-SuperAdmin caller gets 403; if the triplestore step fails
+    (502), nothing was deleted and it is safe to retry."""
+    if (confirm_slug or "").strip() != (slug or "").strip() or not (slug or "").strip():
+        return {"error": True, "status_code": 400,
+                "detail": "confirm_slug must equal slug; nothing was deleted."}
+    return _delete(f"/api/spaces/{_seg(slug)}", params={"confirm": confirm_slug.strip()},
+                   timeout=httpx.Timeout(600.0, connect=15.0))
 
 
 @mcp.tool()

@@ -47,6 +47,7 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager) |
 | `brainkb_add_space_member(slug, email, role)` | Manage members (owner/manager) |
 | `brainkb_add_space_graph(slug, graph_iri, description?)` | Register + bind a graph to a space |
+| `brainkb_delete_space(slug, confirm_slug)` | **SuperAdmin only, irreversible.** Delete a space and everything in it: its graphs, their ingestion-history (delta) graphs, registry entries, members, access rules and search entries. The deletion is recorded in provenance. `confirm_slug` must equal `slug` |
 | `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
 
 ### Ingest & jobs
