@@ -86,6 +86,14 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_add_access_rule(slug, action, subject_type, subject_value)` | Add a per-space rule (read/write/manage × global_role/member/space_role) — a write rule GRANTS a group ingest into that space |
 | `brainkb_remove_access_rule(slug, rule_id)` | Remove a per-space access rule |
 
+### Reserved named graphs (Admin/SuperAdmin)
+A reserved graph IRI (or every IRI under a reserved prefix) can be registered or bound to a space only by an Admin/SuperAdmin, or, when reserved for a space, by that space's managers/editors. BrainKB's own metadata and provenance graphs are always reserved and can't be bound by anyone.
+| Tool | What it does |
+|------|--------------|
+| `brainkb_list_reserved_graphs()` | List reservations, including the built-in system ones |
+| `brainkb_reserve_graph(iri, match_type="exact", reason?, space_slug?)` | Reserve one IRI (`exact`) or a prefix (`prefix`), optionally for one space; lists graphs already bound |
+| `brainkb_unreserve_graph(reservation_id)` | Remove a reservation (system ones can't be removed) |
+
 ### Admin user management (usermanagement service, `:8004`)
 Require an **Admin/SuperAdmin** role and an authenticated caller (`BRAINKB_TOKEN`, `brainkb_login`, or an `Authorization` header).
 Assigning/removing the `Admin` role and banning an Admin are **SuperAdmin-only**.

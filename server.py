@@ -2047,6 +2047,43 @@ def brainkb_remove_access_rule(slug: str, rule_id: int) -> Any:
 
 
 # --------------------------------------------------------------------------- #
+# reserved named graphs (query_service; requires Admin/SuperAdmin)
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def brainkb_list_reserved_graphs() -> Any:
+    """(Admin/SuperAdmin) List reserved named graphs: graph IRIs, or every IRI under a
+    prefix, that only an Admin/SuperAdmin — or, when reserved for a space, that
+    space's managers/editors — may register or bind. Includes the built-in system
+    reservations (BrainKB's metadata and provenance graphs), which nobody can bind."""
+    return _get("/api/admin/reserved-graphs")
+
+
+@mcp.tool()
+def brainkb_reserve_graph(iri: str, match_type: str = "exact", reason: str = "",
+                          space_slug: str = "") -> Any:
+    """(Admin/SuperAdmin) Reserve a named graph so other users can't create it.
+
+    match_type 'exact' reserves one graph IRI; 'prefix' reserves every IRI starting
+    with it (e.g. 'https://brainkb.org/graph/allen/'). Give a `reason` — it is shown
+    to anyone who is refused. Optional `space_slug` reserves it for that space, whose
+    managers/editors may then bind it. Graphs already bound stay where they are; the
+    response lists them under `already_bound`. 409 if it is already reserved,
+    overlaps a system graph, or is bound to another space than `space_slug`."""
+    body: Dict[str, Any] = {"iri": iri, "match_type": match_type, "reason": reason or None}
+    if space_slug:
+        body["space_slug"] = space_slug
+    return _post("/api/admin/reserved-graphs", json=body)
+
+
+@mcp.tool()
+def brainkb_unreserve_graph(reservation_id: int) -> Any:
+    """(Admin/SuperAdmin) Remove a reservation by its id (see
+    brainkb_list_reserved_graphs). System reservations cannot be removed."""
+    return _delete(f"/api/admin/reserved-graphs/{int(reservation_id)}")
+
+
+# --------------------------------------------------------------------------- #
 # admin user management (usermanagement service; requires Admin/SuperAdmin)
 # --------------------------------------------------------------------------- #
 
