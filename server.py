@@ -1858,6 +1858,18 @@ _SS_SKIP_NAMES = {".DS_Store", "Thumbs.db"}
 _SS_MAX_FILES = 1000
 
 
+def _ss_route_missing(out: Any) -> Any:
+    """FastAPI's bare 404 ({"detail": "Not Found"}) means the backend has no
+    /api/synthscholar route at all — an MCP deployed ahead of its query_service.
+    Say that, instead of letting it read as "no such review" or "no reviews"."""
+    if isinstance(out, dict) and out.get("error") and out.get("status_code") in (404, 405) \
+            and out.get("detail") in ({"detail": "Not Found"}, {"detail": "Method Not Allowed"}, "Not Found"):
+        return {"error": True, "status_code": out["status_code"],
+                "detail": "This BrainKB backend's query service has no SynthScholar ingest yet "
+                          "(/api/synthscholar/reviews) — it needs updating to the release that adds it."}
+    return out
+
+
 @mcp.tool()
 def brainkb_synthscholar_ingest(output_dir: str, space_slug: str) -> Any:
     """Ingest a SynthScholar review — the output directory of a run (the folder
@@ -1908,7 +1920,7 @@ def brainkb_synthscholar_ingest(output_dir: str, space_slug: str) -> Any:
         form = {"space_slug": space_slug}
         if left_out:
             form["left_out"] = jsonlib.dumps(left_out[:5000])
-        return _post("/api/synthscholar/reviews", files=files, data=form, timeout=_UPLOAD_TIMEOUT)
+        return _ss_route_missing(_post("/api/synthscholar/reviews", files=files, data=form, timeout=_UPLOAD_TIMEOUT))
     finally:
         for fh in handles:
             try:
@@ -1921,7 +1933,7 @@ def brainkb_synthscholar_ingest(output_dir: str, space_slug: str) -> Any:
 def brainkb_synthscholar_list_reviews(space: str = "") -> Any:
     """Ingested SynthScholar reviews you can read (public spaces: anyone): id, title,
     space, graph, included count, when ingested, ingest job."""
-    return _get("/api/synthscholar/reviews", params={"space": space} if space else None, anonymous=True)
+    return _ss_route_missing(_get("/api/synthscholar/reviews", params={"space": space} if space else None, anonymous=True))
 
 
 @mcp.tool()
@@ -1930,7 +1942,7 @@ def brainkb_synthscholar_get_review(review_id: str) -> Any:
     kind, media type, size, sha256), the run's search log and verification, the
     screening basis and full-text retrieval. Long texts and the per-study list are
     left out here — read them from the graph or the review page."""
-    out = _get(f"/api/synthscholar/reviews/{_seg(review_id)}", anonymous=True)
+    out = _ss_route_missing(_get(f"/api/synthscholar/reviews/{_seg(review_id)}", anonymous=True))
     if isinstance(out, dict) and isinstance(out.get("detail"), dict):
         d = out["detail"]
         out["detail"] = {k: d.get(k) for k in ("research_question", "search_queries", "flow", "screening", "retrieval")}
