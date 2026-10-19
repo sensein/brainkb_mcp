@@ -801,6 +801,8 @@ _ANON_READ_PATHS = (
     re.compile(r"^/api/search$"),
     re.compile(r"^/api/synthscholar/reviews$"),           # reviews in public spaces
     re.compile(r"^/api/synthscholar/reviews/[^/]+$"),
+    re.compile(r"^/api/synthscholar/reviews/[^/]+/(studies|screening|evidence)$"),
+    re.compile(r"^/api/synthscholar/studies$"),
 )
 
 
@@ -1930,10 +1932,68 @@ def brainkb_synthscholar_ingest(output_dir: str, space_slug: str) -> Any:
 
 
 @mcp.tool()
-def brainkb_synthscholar_list_reviews(space: str = "") -> Any:
+def brainkb_synthscholar_list_reviews(space: str = "", q: str = "") -> Any:
     """Ingested SynthScholar reviews you can read (public spaces: anyone): id, title,
-    space, graph, included count, when ingested, ingest job."""
-    return _ss_route_missing(_get("/api/synthscholar/reviews", params={"space": space} if space else None, anonymous=True))
+    research question, space, graph, included count, when ingested, ingest job.
+    `q` filters on text in the title or research question."""
+    params = {k: v for k, v in (("space", space), ("q", q)) if v}
+    return _ss_route_missing(_get("/api/synthscholar/reviews", params=params or None, anonymous=True))
+
+
+def _ss_query(review_id: str, what: str, params: Dict[str, Any]) -> Any:
+    params = {k: v for k, v in params.items() if v not in (None, "", 0) or k == "offset" and v}
+    return _ss_route_missing(_get(f"/api/synthscholar/reviews/{_seg(review_id)}/{what}", params=params, anonymous=True))
+
+
+@mcp.tool()
+def brainkb_synthscholar_studies(review_id: str, q: str = "", full_text: Optional[bool] = None, source: str = "",
+                                 rob: str = "", year_from: int = 0, year_to: int = 0, with_abstract: bool = False,
+                                 limit: int = 50, offset: int = 0) -> Any:
+    """The included studies of an ingested review, filtered. `q`: text in title,
+    authors, journal, DOI, PMID or keywords. `full_text`: true = read in full,
+    false = abstract only. `source`: full-text route (europe_pmc, unpaywall, ezproxy,
+    arxiv, …). `rob`: risk-of-bias rating (low, high, some concerns). Years
+    inclusive. Each study: ids, title, authors, year, journal, how it was read and
+    by which route, RoB. Paged (`total`, at most 200 per call)."""
+    return _ss_query(review_id, "studies", {"q": q, "full_text": None if full_text is None else str(full_text).lower(),
+                                           "source": source, "rob": rob, "year_from": year_from, "year_to": year_to,
+                                           "with_abstract": "true" if with_abstract else None, "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_screening(review_id: str, stage: str = "", decision: str = "", assessed_on: str = "",
+                                   reason: str = "", q: str = "", pmid: str = "", limit: int = 50, offset: int = 0) -> Any:
+    """The screening audit trail of an ingested review: every decision with its
+    stage (title_abstract | full_text), decision (include | exclude), what it was
+    judged on (title_abstract | full_text | abstract_only), the full-text route and
+    the reason. Filter by any of those, by text or criterion code in the reason
+    (e.g. "EC2"), or by PMID. Also returns counts for the filtered set: by stage and
+    decision, what decisions were judged on, and exclusion reasons by criterion."""
+    return _ss_query(review_id, "screening", {"stage": stage, "decision": decision, "assessed_on": assessed_on,
+                                             "reason": reason, "q": q, "pmid": pmid, "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_evidence(review_id: str, q: str = "", claim: str = "", pmid: str = "",
+                                  grounded: Optional[bool] = None, limit: int = 50, offset: int = 0) -> Any:
+    """Evidence spans of an ingested review: the quoted text its claims rest on, with
+    the study, section, relevance, and whether the quote was matched verbatim in
+    the source (`grounded`). Filter by text, claim type, PMID or grounding."""
+    return _ss_query(review_id, "evidence", {"q": q, "claim": claim, "pmid": pmid,
+                                            "grounded": None if grounded is None else str(grounded).lower(),
+                                            "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_find_study(doi: str = "", pmid: str = "", title: str = "") -> Any:
+    """Which ingested reviews (that you can read) include or screened a study —
+    by DOI, PMID or part of its title (6+ characters) — and what happened to it in
+    each: included (read in full or from the abstract) or each screening decision
+    with its reason."""
+    params = {k: v for k, v in (("doi", doi), ("pmid", pmid), ("title", title)) if v}
+    if not params:
+        return {"error": True, "detail": "Give a doi, pmid or title."}
+    return _ss_route_missing(_get("/api/synthscholar/studies", params=params, anonymous=True))
 
 
 @mcp.tool()
