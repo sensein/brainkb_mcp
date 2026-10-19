@@ -795,6 +795,8 @@ def _result(resp: httpx.Response) -> Any:
 # allowlist stops a future `anonymous=True` on any other path from widening it.
 _ANON_READ_PATHS = (
     re.compile(r"^/api/spaces$"),
+    re.compile(r"^/api/spaces/[^/]+$"),          # one space's manifest (public: people redacted)
+    re.compile(r"^/api/spaces/[^/]+/tree$"),     # a space and its visible subspaces
     re.compile(r"^/api/spaces/[^/]+/data$"),
     re.compile(r"^/api/search$"),
 )
@@ -1182,7 +1184,11 @@ def brainkb_use_token(token: str, base_url: str = "") -> str:
 def brainkb_list_spaces() -> Any:
     """List spaces the user can see (their own/member spaces + public ones), each
     annotated with THIS caller's permission so you know what they may do:
-      - your_role: 'owner' | 'editor' | 'viewer' | null (their space membership)
+      - your_role: 'owner' | 'editor' | 'viewer' | null (their space membership,
+                   including a role inherited from a parent space)
+      - role_inherited: the role comes from a parent space, not this one
+      - parent_slug: the parent space, when this is a subspace the caller can see
+                     the parent of (build the tree from it)
       - is_owner:  they own the space
       - access:    'owner' | 'member' | 'public' (how it's available to them)
       - can_write: their space role permits ingest (owner/editor) — a real ingest
@@ -1205,16 +1211,43 @@ def brainkb_list_spaces() -> Any:
 
 @mcp.tool()
 def brainkb_create_space(slug: str, name: str, visibility: str = "private",
-                         description: str = "", space_type: str = "individual") -> Any:
-    """Create a workspace/space. The caller becomes owner.
+                         description: str = "", space_type: str = "individual",
+                         parent_slug: str = "") -> Any:
+    """Create a workspace/space, or a subspace inside one. The caller becomes owner.
     slug: lowercase/hyphen id, **globally unique** — if it's already taken the call
-    returns 409 (pick another slug; slugs are never reused/deleted).
-    visibility: 'private' or 'public';
+    returns 409 (pick another slug).
+    visibility: 'private' or 'public' (set per space: a private space may hold a
+    public subspace);
     description: short human description (recommended — surfaces in the registry);
     space_type: 'individual' (a personal space — any write-capable role) or 'team'
-    (a shared space — only Admin/SuperAdmin, or a user granted create_team_space)."""
-    return _post("/api/spaces", json={"slug": slug, "name": name, "visibility": visibility,
-                                       "description": description, "space_type": space_type})
+    (a shared space — only Admin/SuperAdmin, or a user granted create_team_space).
+    parent_slug: create it as a **subspace** of that space (any depth). Needs the
+    right to manage the parent; the subspace takes the parent's space_type, and
+    everyone with a role in the parent (or above) gets the same role in it. A
+    subspace can't be moved to another parent later."""
+    body = {"slug": slug, "name": name, "visibility": visibility,
+            "description": description, "space_type": space_type}
+    if parent_slug:
+        body["parent_slug"] = parent_slug
+    return _post("/api/spaces", json=body)
+
+
+@mcp.tool()
+def brainkb_get_space(slug: str) -> Any:
+    """A space's details: graphs, members (direct, plus `inherited_members` with the
+    parent space each comes from), visibility, `parent_slug`, `ancestors` (root
+    first) and direct `subspaces` — only the ones the caller may see — and the
+    caller's `your_role` / `role_inherited`. Public spaces need no login; member
+    emails are shown to members and admins only."""
+    return _get(f"/api/spaces/{_seg(slug)}", anonymous=True)
+
+
+@mcp.tool()
+def brainkb_space_tree(slug: str) -> Any:
+    """A space and every subspace below it (any depth), nested: each node has slug,
+    name, visibility, the caller's role and whether it's inherited from a parent,
+    and its graph count. Only subspaces the caller may see are included."""
+    return _get(f"/api/spaces/{_seg(slug)}/tree", anonymous=True)
 
 
 @mcp.tool()
