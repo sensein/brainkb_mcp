@@ -801,7 +801,7 @@ _ANON_READ_PATHS = (
     re.compile(r"^/api/search$"),
     re.compile(r"^/api/synthscholar/reviews$"),           # reviews in public spaces
     re.compile(r"^/api/synthscholar/reviews/[^/]+$"),
-    re.compile(r"^/api/synthscholar/reviews/[^/]+/(studies|screening|evidence)$"),
+    re.compile(r"^/api/synthscholar/reviews/[^/]+/(studies|screening|evidence|records|text)$"),
     re.compile(r"^/api/synthscholar/studies$"),
 )
 
@@ -1982,6 +1982,27 @@ def brainkb_synthscholar_evidence(review_id: str, q: str = "", claim: str = "", 
     return _ss_query(review_id, "evidence", {"q": q, "claim": claim, "pmid": pmid,
                                             "grounded": None if grounded is None else str(grounded).lower(),
                                             "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_records(review_id: str, kind: str, q: str = "", study: str = "", fields: str = "",
+                                 limit: int = 50, offset: int = 0) -> Any:
+    """Per-study records an ingested review produced. `kind`: `charting` (the
+    data-charting form's answers per study), `appraisal` (critical appraisal by
+    domain) or `narrative` (narrative synthesis rows: design, methods, outcomes,
+    limitations). `q`: text in the answers (e.g. "neo4j" finds the studies that
+    report it); `study`: source id (S-001), title, DOI or PMID; `fields`:
+    comma-separated fields to return (the response lists the available ones)."""
+    return _ss_query(review_id, "records", {"kind": kind, "q": q, "study": study, "fields": fields,
+                                           "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_text(review_id: str, section: str = "") -> Any:
+    """An ingested review's own text: `abstract`, `introduction`, `synthesis`,
+    `bias`, `limitations`, `conclusions`, `research_question`, `search_queries` or
+    `per_group` (the per-group analysis) — or all of them when `section` is empty."""
+    return _ss_query(review_id, "text", {"section": section})
 
 
 @mcp.tool()
