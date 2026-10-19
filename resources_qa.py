@@ -47,6 +47,14 @@ CATEGORY = register_category(
     "resources named but never described). "
     "Compare what different papers claim about the same resource, and join a "
     "paper's resources to the named entities extracted from it. "
+    "Track maintenance from provenance-tracked activity assessments (when, by "
+    "which checker version, from which queries) against code hosts and package "
+    "registries, ontology registries (OBO Foundry, OLS), RRIDs and data archives "
+    "(GEO): current activity status (active, stale, inactive, archived, "
+    "deprecated, unavailable, unknown; datasets: available, embargoed), last "
+    "commit/release dates, status history and "
+    "changes, drift between the version a paper states and what the registry "
+    "shows today, and resources never checked. "
     "Every query reads one named graph, given by its optional `graph` "
     "parameter (default https://www.brainkb.org/resources/). When the user "
     "means a particular space or workspace, find its graph IRI with "
@@ -2205,4 +2213,839 @@ LIMIT {{limit}}
 
 ################################################################################
 # End CQ26
+################################################################################
+
+#******************************************************************************
+# Competency Questions — J. Maintenance and activity
+#
+# An activity check (bkr:hasActivityCheck) records what code hosts and package
+# registries reported about a resource at one point in time. Most queries read
+# only the latest check per resource; rs_activity_history and
+# rs_activity_status_changes read them all.
+
+################################################################################
+# Optional user parameter query
+# CQ27 — Current activity status of each resource
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_status",
+    category=CATEGORY,
+    question="What is the current activity status of each resource, and which resources have a given status?",
+    notes=(
+        "Use for 'Is this tool still maintained?', 'When was X last active?', "
+        "'What is the activity status of the resources in this graph?'. Reads "
+        "only the latest activity check per resource. "
+        "Also use for 'Give me the archived / inactive / stale resources', 'Which "
+        "datasets are embargoed?', 'List active tools'. "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name (resolve with rs_find_resource); omit for every resource. `status`, "
+        "one status or a comma-separated list (e.g. 'archived' or "
+        "'inactive,stale'); case-insensitive; omit for every status. "
+        "Returns ?resource, ?name, ?status (code and ontologies: 'active', 'stale', "
+        "'inactive', 'archived', 'deprecated', 'unavailable', 'unknown' when no "
+        "source gave a date; datasets: 'available' or 'embargoed' — a dataset is "
+        "not stale for being unchanged), ?lastActivity (latest commit, release, "
+        "package upload or dataset update; may be unbound), ?checkedOn (when the "
+        "assessment was made: prov:generatedAtTime, a full timestamp; a date only "
+        "for checks recorded before provenance tracking) and ?assessment (pass to "
+        "rs_activity_provenance for who/when/from where) and ?reason (why it got "
+        "that status: the rule and the evidence). Resources never checked do not appear — see "
+        "rs_unchecked_resources. Limit defaults to 1000 rows. Scoped to the "
+        "named graph given by `graph`."
+    ),
+    example={"name": "", "status": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?resource ?name ?status ?lastActivity ?checkedOn ?assessment ?reason
+WHERE {
+  VALUES ?requestedName { {{name}} }
+  VALUES ?requestedStatus { {{status}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           bkr:activityStatus ?statusIRI .
+    OPTIONAL { ?assessment bkr:lastActivityDate ?lastActivity }
+    OPTIONAL { ?assessment bkr:statusReason ?reason }
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
+    }
+  }
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+  FILTER(?requestedStatus = "" ||
+         CONTAINS(CONCAT(",", REPLACE(LCASE(?requestedStatus), " ", ""), ","), CONCAT(",", ?status, ",")))
+}
+ORDER BY ?status ?name
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "status",
+            "string",
+            "Optional status or comma-separated statuses: active, stale, inactive, archived, deprecated, "
+            "unavailable, unknown, available, embargoed. Omit for all.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ27
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ28 — Resources no longer actively maintained
+################################################################################
+
+register(QAQuery(
+    id="rs_unmaintained_resources",
+    category=CATEGORY,
+    question="Which resources are no longer actively maintained (stale, inactive, archived, deprecated or unavailable)?",
+    notes=(
+        "Use for 'Which tools are abandoned?', 'Which resources are archived or "
+        "deprecated?', 'Is anything in this catalogue unmaintained?'. Reads only "
+        "the latest activity check per resource and keeps statuses 'stale', "
+        "'inactive', 'archived', 'deprecated' and 'unavailable' ('inactive' "
+        "includes ontologies OBO Foundry lists as inactive or orphaned). Datasets "
+        "('available', 'embargoed') and 'unknown' are not included. "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; omit for every resource. "
+        "Returns ?resource, ?name, ?status, ?lastActivity (may be unbound) and "
+        "?checkedOn, longest-inactive first. Limit defaults to 1000 rows. "
+        "Scoped to the named graph given by `graph`."
+    ),
+    example={"name": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?resource ?name ?status ?lastActivity ?checkedOn
+WHERE {
+  VALUES ?requestedName { {{name}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           bkr:activityStatus ?statusIRI .
+    OPTIONAL { ?assessment bkr:lastActivityDate ?lastActivity }
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
+    }
+  }
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
+  FILTER(?status IN ("stale", "inactive", "archived", "deprecated", "unavailable"))
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?lastActivity ?name
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ28
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ29 — Resources with no activity since a given date
+################################################################################
+
+register(QAQuery(
+    id="rs_inactive_since",
+    category=CATEGORY,
+    question="Which resources have had no commit, release or package upload since a given date?",
+    notes=(
+        "Use for 'Which tools have not been updated since 2023?', 'What has "
+        "been inactive for over two years?'. Reads only the latest activity "
+        "check per resource; resources whose check found no activity date are "
+        "left out. "
+        "OPTIONAL INPUT: `since`, a date as YYYY-MM-DD (default 2023-01-01) — "
+        "resources whose last activity falls before that day are returned; "
+        "`name`, a case-insensitive substring of the resource name. "
+        "Returns ?resource, ?name, ?lastActivity and ?checkedOn, oldest first. "
+        "Limit defaults to 1000 rows. Scoped to the named graph given by `graph`."
+    ),
+    example={"since": "2023-01-01", "name": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?resource ?name ?lastActivity ?checkedOn
+WHERE {
+  VALUES ?requestedName { {{name}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           bkr:lastActivityDate ?lastActivity .
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
+    }
+  }
+  # Compare the YYYY-MM-DD prefix, so xsd:date and xsd:dateTime values both work.
+  FILTER(SUBSTR(STR(?lastActivity), 1, 10) < {{since}})
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?lastActivity ?name
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "since",
+            "string",
+            "Cut-off date as YYYY-MM-DD; resources last active before this day are returned.",
+            default="2023-01-01",
+        ),
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ29
+################################################################################
+
+################################################################################
+# Optional user parameter query — result limit only
+# CQ30 — Number of resources per activity status
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_status_counts",
+    category=CATEGORY,
+    question="How many resources are in each activity status?",
+    notes=(
+        "Use for 'How much of the catalogue is still maintained?', 'Summarise "
+        "activity status'. Reads only the latest activity check per resource. "
+        "Returns ?status and ?resources (distinct resources), largest first. "
+        "Unchecked resources are not counted — see rs_unchecked_resources. "
+        "Limit defaults to 1000 rows. Scoped to the named graph given by `graph`."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?status (COUNT(DISTINCT ?resource) AS ?resources)
+WHERE {
+  GRAPH {{graph}} {
+    ?resource bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           bkr:activityStatus ?statusIRI .
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
+    }
+  }
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
+}
+GROUP BY ?status
+ORDER BY DESC(?resources) ?status
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ30
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ31 — What each code host or package registry reported
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_signals",
+    category=CATEGORY,
+    question="What did each code host or package registry report for each resource (last commit, last release, latest version, archived, deprecated)?",
+    notes=(
+        "Use for 'Why is X marked stale?', 'What does GitHub / PyPI say about "
+        "this tool?', 'What is the latest released version?'. Reads the signals "
+        "of the latest activity check per resource; one row per source checked. "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; omit for every resource. "
+        "Returns ?resource, ?name, ?source (code host or registry, e.g. "
+        "'github', 'pypi', 'bioconductor', 'obofoundry', 'ols', 'rrid', 'geo'), "
+        "?checkedURL, ?lastCommit, ?lastRelease, ?latestVersion, ?archived, "
+        "?deprecated, ?available, ?embargoed (datasets), ?answeredAt (when the "
+        "source answered), ?decided (true when this signal decided the status), "
+        "?declaredStatus (a "
+        "registry's curated status, e.g. OBO Foundry 'inactive') and ?note "
+        "(says 'matched by title' or similar when the source was found from the "
+        "resource's name); any but the first four may be unbound when the source "
+        "did not report it. "
+        "Limit defaults to 1000 rows. Scoped to the named graph given by `graph`."
+    ),
+    example={"name": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT ?resource ?name ?source ?checkedURL ?lastCommit ?lastRelease ?latestVersion
+       ?archived ?deprecated ?available ?embargoed ?answeredAt ?decided ?declaredStatus ?note
+WHERE {
+  VALUES ?requestedName { {{name}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           prov:wasDerivedFrom ?signal .
+    ?signal bkr:activitySource ?sourceIRI ;
+            bkr:checkedURL ?checkedURL .
+    OPTIONAL { ?signal bkr:lastCommitDate ?lastCommit }
+    OPTIONAL { ?signal bkr:lastReleaseDate ?lastRelease }
+    OPTIONAL { ?signal bkr:latestVersion ?latestVersion }
+    OPTIONAL { ?signal bkr:isArchived ?archived }
+    OPTIONAL { ?signal bkr:isDeprecated ?deprecated }
+    OPTIONAL { ?signal bkr:isAvailable ?available }
+    OPTIONAL { ?signal bkr:isEmbargoed ?embargoed }
+    OPTIONAL { ?signal prov:generatedAtTime ?answeredAt }
+    BIND(EXISTS { ?assessment bkr:statusDecidedBy ?signal } AS ?decided)
+    OPTIONAL { ?signal bkr:declaredActivityStatus ?declaredStatus }
+    OPTIONAL { ?signal rdfs:comment ?note }
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
+    }
+  }
+  BIND(STRAFTER(STR(?sourceIRI), "/activity-source/") AS ?source)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?name ?source
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ31
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ32 — Full history of activity checks
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_history",
+    category=CATEGORY,
+    question="What is the full history of activity checks for each resource?",
+    notes=(
+        "Use for 'How has X's activity changed over time?', 'When was this "
+        "resource checked?'. Returns every activity check, not only the latest. "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; omit for every resource. "
+        "Returns ?resource, ?name, ?checkedOn, ?status and ?lastActivity (may "
+        "be unbound), oldest check first per resource. For status changes only, "
+        "use rs_activity_status_changes. Limit defaults to 1000 rows. Scoped to "
+        "the named graph given by `graph`."
+    ),
+    example={"name": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?resource ?name ?checkedOn ?status ?lastActivity
+WHERE {
+  VALUES ?requestedName { {{name}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           bkr:activityStatus ?statusIRI .
+    OPTIONAL { ?assessment bkr:lastActivityDate ?lastActivity }
+  }
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?name ?checkedOn
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ32
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ33 — Status changes between consecutive checks
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_status_changes",
+    category=CATEGORY,
+    question="Which resources changed activity status between two consecutive checks (e.g. active to stale)?",
+    notes=(
+        "Use for 'Which tools went stale recently?', 'Has anything been "
+        "archived since the last check?', 'Did X become active again?'. Pairs "
+        "each check with the one immediately before it and keeps only pairs "
+        "whose status differs. "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; omit for every resource. "
+        "Returns ?resource, ?name, ?previousStatus, ?previousCheck, "
+        "?currentStatus and ?currentCheck. An empty result means no resource "
+        "has changed status, or each has been checked only once. Limit "
+        "defaults to 1000 rows. Scoped to the named graph given by `graph`."
+    ),
+    example={"name": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?resource ?name ?previousStatus ?previousCheck ?currentStatus ?currentCheck
+WHERE {
+  VALUES ?requestedName { {{name}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?prev, ?curr .
+    ?prev prov:generatedAtTime ?previousCheck ; bkr:activityStatus ?prevIRI .
+    ?curr prov:generatedAtTime ?currentCheck ; bkr:activityStatus ?currIRI .
+    FILTER(STR(?previousCheck) < STR(?currentCheck) && ?prevIRI != ?currIRI)
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?between .
+      ?between prov:generatedAtTime ?d .
+      FILTER(STR(?d) > STR(?previousCheck) && STR(?d) < STR(?currentCheck))
+    }
+  }
+  BIND(STRAFTER(STR(?prevIRI), "/activity-status/") AS ?previousStatus)
+  BIND(STRAFTER(STR(?currIRI), "/activity-status/") AS ?currentStatus)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?name ?currentCheck
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ33
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ34 — Paper-stated version and lifecycle vs. observed activity
+################################################################################
+
+register(QAQuery(
+    id="rs_version_drift",
+    category=CATEGORY,
+    question="How does the version and lifecycle status a paper states compare with what the repository or registry shows today?",
+    notes=(
+        "Use for 'Is the version in the paper still current?', 'The paper says "
+        "this tool is maintained — is it?', 'Which resources have drifted from "
+        "what was published?'. Catches drift such as a paper stating "
+        "'maintained, v1.0' while the repository has been inactive since 2019. "
+        "Compares each paper-stated version with the latest activity check. "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; omit for every resource. "
+        "Returns ?resource, ?name, ?paperStatedVersion, ?paperLifecycle (may be "
+        "unbound), ?title and ?paper (the paper stating the version), "
+        "?observedStatus and ?latestVersion (reported by a code host or "
+        "registry; may be unbound, one row per source reporting one). A "
+        "difference is a candidate drift for the user to judge — the paper may "
+        "simply predate later releases. Limit defaults to 1000 rows. Scoped to "
+        "the named graph given by `graph`."
+    ),
+    example={"name": "", "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX ner: <https://brainkb.org/ner/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT DISTINCT ?resource ?name ?paperStatedVersion ?paperLifecycle ?title ?paper
+                ?observedStatus ?latestVersion
+WHERE {
+  VALUES ?requestedName { {{name}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasVersion ?version ;
+              bkr:hasActivityAssessment ?assessment .
+    ?version bkr:versionIdentifier ?paperStatedVersion .
+    OPTIONAL { ?version bkr:lifecycleStatus ?lc }
+    OPTIONAL { ?version prov:hadPrimarySource ?paper . OPTIONAL { ?paper ner:title ?title } }
+    ?assessment prov:generatedAtTime ?checkedOn ;
+           bkr:activityStatus ?statusIRI .
+    OPTIONAL { ?assessment prov:wasDerivedFrom ?s . ?s bkr:latestVersion ?latestVersion }
+    FILTER NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?checkedOn))
+    }
+  }
+  BIND(STRAFTER(STR(?lc), "/lifecycle-status/") AS ?paperLifecycle)
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?observedStatus)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?name ?title
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ34
+################################################################################
+
+################################################################################
+# Optional user parameter query — result limit only
+# CQ35 — Resources never checked for activity
+################################################################################
+
+register(QAQuery(
+    id="rs_unchecked_resources",
+    category=CATEGORY,
+    question="Which resources have never had an activity check (no repository or package found, or the check was never run)?",
+    notes=(
+        "Use for 'Which resources have we not checked for maintenance?', "
+        "'Which tools have no repository or package link?'. "
+        "Returns ?resource, ?name, ?url (access URL; unbound when none is "
+        "recorded) and ?stub (true for a mention stub — a resource only named "
+        "in a paper, never described, so there is no link to check). Limit "
+        "defaults to 1000 rows. Scoped to the named graph given by `graph`."
+    ),
+    example={"limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?resource ?name ?url ?stub
+WHERE {
+  GRAPH {{graph}} {
+    # A described resource has a record; a mention stub has none and is typed only
+    # by its subclass (e.g. bkr:SoftwareLibrary), so `a bkr:Resource` misses it
+    # without entailment. The paper also carries bkr:resourceName: neither branch
+    # matches it.
+    { ?resource bkr:hasRecord ?record }
+    UNION
+    { ?resource dcterms:identifier ?id FILTER(STRSTARTS(STR(?id), "mentioned/")) }
+    ?resource bkr:resourceName ?name .
+    OPTIONAL { ?resource bkr:accessURL ?url }
+    FILTER NOT EXISTS { ?resource bkr:hasActivityAssessment ?assessment }
+    BIND(NOT EXISTS { ?resource bkr:hasRecord ?rec } AS ?stub)
+  }
+}
+ORDER BY ?stub ?name
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ35
+################################################################################
+
+################################################################################
+# Optional user parameter query
+# CQ36 — Provenance of activity assessments
+################################################################################
+
+register(QAQuery(
+    id="rs_activity_provenance",
+    category=CATEGORY,
+    question="When was each activity assessment made, by which software version, and from which sources and queries?",
+    notes=(
+        "Use for 'When was X last checked?', 'Which version of the checker produced "
+        "this status?', 'Where did this date come from?', 'Show the provenance of "
+        "this assessment'. Follows the PROV / NIDM-style chain: an "
+        "ActivityAssessment (cf. nidm:AcquisitionObject) prov:wasGeneratedBy an "
+        "ActivityCheck (cf. nidm:Acquisition) that is dcterms:isPartOf an "
+        "ActivityCheckRun (cf. nidm:Session), associated with a prov:SoftwareAgent "
+        "carrying its NIDM software version; the assessment prov:wasDerivedFrom "
+        "one signal per source, each with the time the answer arrived and the API "
+        "URLs queried (prov:hadPrimarySource). "
+        "OPTIONAL INPUT: `name`, a case-insensitive substring of the resource "
+        "name; `latest`, 1 (default) for each resource's latest assessment only, 0 "
+        "for every assessment. "
+        "Also answers 'How was the status reached?' (?reason, and ?decided on the "
+        "signals that decided it) and 'Which run, with which thresholds?'. "
+        "Returns ?resource, ?name, ?assessment, ?assessedAt, ?status, ?reason, "
+        "?check, ?checkStarted, ?checkEnded, ?run, ?runStarted, ?runEnded, "
+        "?staleAfterDays, ?inactiveAfterDays, ?agent, ?softwareVersion, ?signal, "
+        "?source, ?decided, ?answeredAt and ?queried (one row per URL queried). Checks "
+        "recorded before provenance tracking have a date-only ?assessedAt and no "
+        "run, start time or software version. Limit defaults to 1000 rows. Scoped "
+        "to the named graph given by `graph`."
+    ),
+    example={"name": "", "latest": 1, "limit": 1000},
+    sparql="""
+PREFIX bkr: <https://brainkb.org/resource/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX nidm: <http://purl.org/nidash/nidm#>
+
+SELECT ?resource ?name ?assessment ?assessedAt ?status ?reason ?check ?checkStarted ?checkEnded
+       ?run ?runStarted ?runEnded ?staleAfterDays ?inactiveAfterDays ?agent ?softwareVersion
+       ?signal ?source ?decided ?answeredAt ?queried
+WHERE {
+  VALUES ?requestedName { {{name}} }
+  VALUES ?latest { {{latest}} }
+
+  GRAPH {{graph}} {
+    ?resource bkr:resourceName ?name ;
+              bkr:hasActivityAssessment ?assessment .
+    ?assessment prov:generatedAtTime ?assessedAt ;
+                bkr:activityStatus ?statusIRI ;
+                prov:wasGeneratedBy ?check .
+    OPTIONAL { ?assessment bkr:statusReason ?reason }
+    OPTIONAL { ?assessment bkr:staleAfterDays ?staleAfterDays }
+    OPTIONAL { ?assessment bkr:inactiveAfterDays ?inactiveAfterDays }
+    OPTIONAL { ?check prov:startedAtTime ?checkStarted }
+    OPTIONAL { ?check prov:endedAtTime ?checkEnded }
+    OPTIONAL { ?check dcterms:isPartOf ?run .
+               OPTIONAL { ?run prov:startedAtTime ?runStarted }
+               OPTIONAL { ?run prov:endedAtTime ?runEnded } }
+    OPTIONAL { ?check prov:wasAssociatedWith ?agent .
+               OPTIONAL { ?agent nidm:NIDM_0000122 ?softwareVersion } }
+    OPTIONAL {
+      ?assessment prov:wasDerivedFrom ?signal .
+      OPTIONAL { ?signal bkr:activitySource ?sourceIRI }
+      OPTIONAL { ?signal prov:generatedAtTime ?answeredAt }
+      OPTIONAL { ?signal prov:hadPrimarySource ?queried }
+      BIND(EXISTS { ?assessment bkr:statusDecidedBy ?signal } AS ?decided)
+    }
+    FILTER(?latest = 0 || NOT EXISTS {
+      ?resource bkr:hasActivityAssessment ?newer .
+      ?newer prov:generatedAtTime ?newerDate .
+      FILTER(STR(?newerDate) > STR(?assessedAt))
+    })
+  }
+  BIND(STRAFTER(STR(?statusIRI), "/activity-status/") AS ?status)
+  BIND(STRAFTER(STR(?sourceIRI), "/activity-source/") AS ?source)
+  FILTER(?requestedName = "" || CONTAINS(LCASE(STR(?name)), LCASE(?requestedName)))
+}
+ORDER BY ?name DESC(?assessedAt) ?source ?queried
+LIMIT {{limit}}
+""",
+    params=(
+        QAParam(
+            "name",
+            "string",
+            "Optional substring of a resource name; omit or use an empty string for all resources.",
+            default="",
+        ),
+        QAParam(
+            "latest",
+            "int",
+            "1 for each resource's latest assessment only, 0 for every assessment.",
+            default=1,
+            minimum=0,
+            maximum=1,
+        ),
+        QAParam(
+            "limit",
+            "int",
+            "Maximum number of rows to return.",
+            default=1000,
+            minimum=1,
+        ),
+        QAParam(
+            "graph",
+            "iri",
+            "Named graph holding the resource data; omit for the default. "
+            "For another space, pass a graph IRI from rs_resource_graphs or brainkb_list_spaces.",
+            default="https://www.brainkb.org/resources/",
+        ),
+    ),
+))
+
+################################################################################
+# End CQ36
 ################################################################################

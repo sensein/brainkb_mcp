@@ -795,6 +795,8 @@ def _result(resp: httpx.Response) -> Any:
 # allowlist stops a future `anonymous=True` on any other path from widening it.
 _ANON_READ_PATHS = (
     re.compile(r"^/api/spaces$"),
+    re.compile(r"^/api/spaces/[^/]+$"),          # one space's manifest (public: people redacted)
+    re.compile(r"^/api/spaces/[^/]+/tree$"),     # a space and its visible subspaces
     re.compile(r"^/api/spaces/[^/]+/data$"),
     re.compile(r"^/api/search$"),
 )
@@ -882,15 +884,17 @@ def _patch(path: str, json: Any = None) -> Any:
         return {"error": True, "detail": str(e)}
 
 
-def _delete(path: str) -> Any:
+def _delete(path: str, params: Optional[Dict[str, Any]] = None,
+            timeout: Optional[httpx.Timeout] = None) -> Any:
     if not _path_ok(path):
         return dict(_BAD_PATH)
     if not _rate_ok("write", _RL_WRITE):
         return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.delete(f"{ctx['url']}{path}", headers={"Authorization": f"Bearer {ctx['token']}"})
+        with httpx.Client(timeout=timeout or _TIMEOUT) as c:
+            resp = c.delete(f"{ctx['url']}{path}", params=params,
+                            headers={"Authorization": f"Bearer {ctx['token']}"})
         return _result(resp)
     except _NotAuthed as e:
         return {"error": True, "detail": str(e)}
@@ -1180,7 +1184,11 @@ def brainkb_use_token(token: str, base_url: str = "") -> str:
 def brainkb_list_spaces() -> Any:
     """List spaces the user can see (their own/member spaces + public ones), each
     annotated with THIS caller's permission so you know what they may do:
-      - your_role: 'owner' | 'editor' | 'viewer' | null (their space membership)
+      - your_role: 'owner' | 'editor' | 'viewer' | null (their space membership,
+                   including a role inherited from a parent space)
+      - role_inherited: the role comes from a parent space, not this one
+      - parent_slug: the parent space, when this is a subspace the caller can see
+                     the parent of (build the tree from it)
       - is_owner:  they own the space
       - access:    'owner' | 'member' | 'public' (how it's available to them)
       - can_write: their space role permits ingest (owner/editor) — a real ingest
@@ -1203,16 +1211,43 @@ def brainkb_list_spaces() -> Any:
 
 @mcp.tool()
 def brainkb_create_space(slug: str, name: str, visibility: str = "private",
-                         description: str = "", space_type: str = "individual") -> Any:
-    """Create a workspace/space. The caller becomes owner.
+                         description: str = "", space_type: str = "individual",
+                         parent_slug: str = "") -> Any:
+    """Create a workspace/space, or a subspace inside one. The caller becomes owner.
     slug: lowercase/hyphen id, **globally unique** — if it's already taken the call
-    returns 409 (pick another slug; slugs are never reused/deleted).
-    visibility: 'private' or 'public';
+    returns 409 (pick another slug).
+    visibility: 'private' or 'public' (set per space: a private space may hold a
+    public subspace);
     description: short human description (recommended — surfaces in the registry);
     space_type: 'individual' (a personal space — any write-capable role) or 'team'
-    (a shared space — only Admin/SuperAdmin, or a user granted create_team_space)."""
-    return _post("/api/spaces", json={"slug": slug, "name": name, "visibility": visibility,
-                                       "description": description, "space_type": space_type})
+    (a shared space — only Admin/SuperAdmin, or a user granted create_team_space).
+    parent_slug: create it as a **subspace** of that space (any depth). Needs the
+    right to manage the parent; the subspace takes the parent's space_type, and
+    everyone with a role in the parent (or above) gets the same role in it. A
+    subspace can't be moved to another parent later."""
+    body = {"slug": slug, "name": name, "visibility": visibility,
+            "description": description, "space_type": space_type}
+    if parent_slug:
+        body["parent_slug"] = parent_slug
+    return _post("/api/spaces", json=body)
+
+
+@mcp.tool()
+def brainkb_get_space(slug: str) -> Any:
+    """A space's details: graphs, members (direct, plus `inherited_members` with the
+    parent space each comes from), visibility, `parent_slug`, `ancestors` (root
+    first) and direct `subspaces` — only the ones the caller may see — and the
+    caller's `your_role` / `role_inherited`. Public spaces need no login; member
+    emails are shown to members and admins only."""
+    return _get(f"/api/spaces/{_seg(slug)}", anonymous=True)
+
+
+@mcp.tool()
+def brainkb_space_tree(slug: str) -> Any:
+    """A space and every subspace below it (any depth), nested: each node has slug,
+    name, visibility, the caller's role and whether it's inherited from a parent,
+    and its graph count. Only subspaces the caller may see are included."""
+    return _get(f"/api/spaces/{_seg(slug)}/tree", anonymous=True)
 
 
 @mcp.tool()
@@ -1220,6 +1255,28 @@ def brainkb_set_space_visibility(slug: str, visibility: str) -> Any:
     """Set a space 'public' (anyone, even anonymous, can read) or 'private'
     (members only). Owner only."""
     return _patch(f"/api/spaces/{_seg(slug)}/visibility", json={"visibility": visibility})
+
+
+@mcp.tool()
+def brainkb_delete_space(slug: str, confirm_slug: str) -> Any:
+    """PERMANENTLY delete a space and everything in it. SuperAdmin only; irreversible.
+
+    Drops the space's named graphs and the ingestion-history (delta) graphs that
+    hold copies of their data, removes the graphs' registry entries and the space's
+    RDF manifest, and deletes the space with its members, access rules and search
+    entries. The deletion itself is kept in the provenance graph (who, when, which
+    graphs: prov:invalidated). `confirm_slug` must equal `slug`.
+
+    Before calling: show the user the space (brainkb_read_space or
+    brainkb_list_spaces) and what will be lost, and get their explicit
+    confirmation in this conversation. Never call it to tidy up on your own
+    initiative. A non-SuperAdmin caller gets 403; if the triplestore step fails
+    (502), nothing was deleted and it is safe to retry."""
+    if (confirm_slug or "").strip() != (slug or "").strip() or not (slug or "").strip():
+        return {"error": True, "status_code": 400,
+                "detail": "confirm_slug must equal slug; nothing was deleted."}
+    return _delete(f"/api/spaces/{_seg(slug)}", params={"confirm": confirm_slug.strip()},
+                   timeout=httpx.Timeout(600.0, connect=15.0))
 
 
 @mcp.tool()
@@ -1825,6 +1882,17 @@ def brainkb_read_space(slug: str) -> Any:
 
 
 @mcp.tool()
+def brainkb_list_writable_spaces() -> Any:
+    """Spaces the caller can ingest into, each with its graphs (and descriptions) and
+    `parent_slug` for subspaces — decided by the same checks ingestion uses: owner/
+    editor membership (including a role inherited from a parent space), a space write
+    access rule, or Admin/SuperAdmin. `can_ingest` false means the caller has no
+    write-capable role at all. `unmapped_graphs` are registered graphs in no space.
+    Use this, not brainkb_list_registered_graphs, to choose where to ingest."""
+    return _get("/api/spaces/writable")
+
+
+@mcp.tool()
 def brainkb_list_registered_graphs() -> Any:
     """List registered named graphs visible to the caller (private-space graphs the
     caller can't access are hidden)."""
@@ -2020,6 +2088,43 @@ def brainkb_remove_access_rule(slug: str, rule_id: int) -> Any:
     """(Space manager) Delete a fine-grained access rule by its id
     (see brainkb_list_access_rules)."""
     return _delete(f"/api/spaces/{_seg(slug)}/access-rules/{rule_id}")
+
+
+# --------------------------------------------------------------------------- #
+# reserved named graphs (query_service; requires Admin/SuperAdmin)
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def brainkb_list_reserved_graphs() -> Any:
+    """(Admin/SuperAdmin) List reserved named graphs: graph IRIs, or every IRI under a
+    prefix, that only an Admin/SuperAdmin — or, when reserved for a space, that
+    space's managers/editors — may register or bind. Includes the built-in system
+    reservations (BrainKB's metadata and provenance graphs), which nobody can bind."""
+    return _get("/api/admin/reserved-graphs")
+
+
+@mcp.tool()
+def brainkb_reserve_graph(iri: str, match_type: str = "exact", reason: str = "",
+                          space_slug: str = "") -> Any:
+    """(Admin/SuperAdmin) Reserve a named graph so other users can't create it.
+
+    match_type 'exact' reserves one graph IRI; 'prefix' reserves every IRI starting
+    with it (e.g. 'https://brainkb.org/graph/allen/'). Give a `reason` — it is shown
+    to anyone who is refused. Optional `space_slug` reserves it for that space, whose
+    managers/editors may then bind it. Graphs already bound stay where they are; the
+    response lists them under `already_bound`. 409 if it is already reserved,
+    overlaps a system graph, or is bound to another space than `space_slug`."""
+    body: Dict[str, Any] = {"iri": iri, "match_type": match_type, "reason": reason or None}
+    if space_slug:
+        body["space_slug"] = space_slug
+    return _post("/api/admin/reserved-graphs", json=body)
+
+
+@mcp.tool()
+def brainkb_unreserve_graph(reservation_id: int) -> Any:
+    """(Admin/SuperAdmin) Remove a reservation by its id (see
+    brainkb_list_reserved_graphs). System reservations cannot be removed."""
+    return _delete(f"/api/admin/reserved-graphs/{int(reservation_id)}")
 
 
 # --------------------------------------------------------------------------- #

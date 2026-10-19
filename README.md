@@ -45,8 +45,13 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_list_spaces()` | List spaces you can see (yours + public) |
 | `brainkb_create_space(slug, name, visibility, description?, space_type?)` | Create a workspace — `space_type` `individual` (write-capable role) or `team` (Admin/granted) |
 | `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager) |
+| `brainkb_create_space(..., parent_slug=…)` | Create a **subspace** (any depth). Needs manage rights on the parent; parent members get the same roles in it |
+| `brainkb_get_space(slug)` | One space's details: graphs, members (direct and inherited), parent, ancestors, subspaces, your role |
+| `brainkb_space_tree(slug)` | A space and all its subspaces, nested, with your role in each |
+| `brainkb_list_writable_spaces()` | Spaces you can ingest into (same checks as ingestion), with their graphs; use it to pick an ingest target |
 | `brainkb_add_space_member(slug, email, role)` | Manage members (owner/manager) |
 | `brainkb_add_space_graph(slug, graph_iri, description?)` | Register + bind a graph to a space |
+| `brainkb_delete_space(slug, confirm_slug)` | **SuperAdmin only, irreversible.** Delete a space and everything in it: its graphs, their ingestion-history (delta) graphs, registry entries, members, access rules and search entries. The deletion is recorded in provenance. `confirm_slug` must equal `slug` |
 | `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
 
 ### Ingest & jobs
@@ -84,6 +89,14 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_list_access_rules(slug)` | List a space's fine-grained access rules |
 | `brainkb_add_access_rule(slug, action, subject_type, subject_value)` | Add a per-space rule (read/write/manage × global_role/member/space_role) — a write rule GRANTS a group ingest into that space |
 | `brainkb_remove_access_rule(slug, rule_id)` | Remove a per-space access rule |
+
+### Reserved named graphs (Admin/SuperAdmin)
+A reserved graph IRI (or every IRI under a reserved prefix) can be registered or bound to a space only by an Admin/SuperAdmin, or, when reserved for a space, by that space's managers/editors. BrainKB's own metadata and provenance graphs are always reserved and can't be bound by anyone.
+| Tool | What it does |
+|------|--------------|
+| `brainkb_list_reserved_graphs()` | List reservations, including the built-in system ones |
+| `brainkb_reserve_graph(iri, match_type="exact", reason?, space_slug?)` | Reserve one IRI (`exact`) or a prefix (`prefix`), optionally for one space; lists graphs already bound |
+| `brainkb_unreserve_graph(reservation_id)` | Remove a reservation (system ones can't be removed) |
 
 ### Admin user management (usermanagement service, `:8004`)
 Require an **Admin/SuperAdmin** role and an authenticated caller (`BRAINKB_TOKEN`, `brainkb_login`, or an `Authorization` header).
