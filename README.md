@@ -87,6 +87,17 @@ Reviews live in ml_service (`BRAINKB_ML_URL`); every call runs as you, so only a
 | `brainkb_delta_history(graph_iri)` | A graph's change history |
 | `brainkb_delta_compare(job_a, job_b)` | Diff two jobs' deltas |
 
+QA categories: `named_entities` (entities, mentions, mappings, claims, extraction
+audit), `resources` (the resource catalogue: scope, assumptions, versions,
+maintenance) and `resource_entity_bridge` (questions that span both, when the two
+exports live in different named graphs — scope against the entities a paper
+actually grounds, shared evidence passages, and cross-graph provenance such as
+whether both pipelines read the same document version). Bridge queries take two
+graph parameters, `resource_graph` and `entity_graph`; `rb_paired_graphs` finds
+which pair holds both halves. Offline check against Turtle exports:
+`test_qa_queries.py` (see [guide.md](guide.md)). Example questions to ask, and
+which query each one routes to: [resource_entity_bridge_questions.md](resource_entity_bridge_questions.md).
+
 ### Authorization / RBAC (query_service)
 | Tool | What it does |
 |------|--------------|

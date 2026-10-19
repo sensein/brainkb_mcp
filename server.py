@@ -2109,7 +2109,7 @@ def brainkb_sparql(sparql_query: str) -> Any:
 
 # Each module registers its QAQuery objects on import. A new category is a new
 # module plus one entry here.
-QA_MODULES = ("named_entities_qa", "resources_qa")
+QA_MODULES = ("named_entities_qa", "resources_qa", "resource_entity_bridge_qa")
 
 for _mod in QA_MODULES:
     importlib.import_module(_mod)
