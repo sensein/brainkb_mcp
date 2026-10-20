@@ -1266,15 +1266,24 @@ def brainkb_set_space_visibility(slug: str, visibility: str) -> Any:
 
 @mcp.tool()
 def brainkb_update_space(slug: str, name: Optional[str] = None,
-                         description: Optional[str] = None) -> Any:
-    """Rename a space (its display name) and/or change its description. Owner/manager
-    only. The slug can't change: it is the space's IRI, and links, graph bindings and
-    provenance point at it. Pass only what changes; description="" clears it. Confirm
-    the new name with the user before calling."""
-    body = {k: v for k, v in (("name", name), ("description", description)) if v is not None}
+                         description: Optional[str] = None,
+                         new_slug: Optional[str] = None) -> Any:
+    """Rename a space, change its description, and/or give it a new slug. Owner/manager
+    only. Pass only what changes; description="" clears it.
+
+    `new_slug` (lowercase letters, digits and hyphens, 3-64 chars) moves the space's IRI
+    and every graph whose IRI is built from the old slug (https://brainkb.org/graph/<slug>/…,
+    …/synthscholar/<slug>/…) to the new slug, with their registry, search and history
+    records and SynthScholar reviews; graphs with other IRIs keep theirs. The old slug and
+    IRIs stay as aliases: they keep resolving and nobody else can take them, but ingest
+    into an old IRI is refused with the new one. The result's `rename.moved_graphs` lists
+    each from → to. 409 if the slug or a target graph is taken.
+
+    Before calling with `new_slug`: show the user the graphs that will move and confirm."""
+    body = {k: v for k, v in (("name", name), ("description", description), ("slug", new_slug)) if v is not None}
     if not body:
         return {"error": True, "status_code": 400,
-                "detail": "pass a name, a description, or both; nothing was changed."}
+                "detail": "pass a name, a description, a new_slug, or a combination; nothing was changed."}
     return _patch(f"/api/spaces/{_seg(slug)}", json=body)
 
 

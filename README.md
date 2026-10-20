@@ -44,7 +44,7 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 |------|--------------|
 | `brainkb_list_spaces()` | List spaces you can see (yours + public) |
 | `brainkb_create_space(slug, name, visibility, description?, space_type?)` | Create a workspace — `space_type` `individual` (write-capable role) or `team` (Admin/granted) |
-| `brainkb_update_space(slug, name?, description?)` | Rename a space or change its description (owner/manager). The slug, and so the space's IRI, stays the same |
+| `brainkb_update_space(slug, name?, description?, new_slug?)` | Rename a space, change its description, or give it a new slug (owner/manager). A new slug moves the graphs named after the old one; the old slug and IRIs stay as aliases |
 | `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager). Making a space public makes all its subspaces public; a subspace of a public space can't be private; under a private space each subspace chooses |
 | `brainkb_create_space(..., parent_slug=…)` | Create a **subspace** (any depth). Needs manage rights on the parent; parent members get the same roles in it |
 | `brainkb_get_space(slug)` | One space's details: graphs, members (direct and inherited), parent, ancestors, subspaces, your role |
