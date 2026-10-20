@@ -1265,6 +1265,20 @@ def brainkb_set_space_visibility(slug: str, visibility: str) -> Any:
 
 
 @mcp.tool()
+def brainkb_update_space(slug: str, name: Optional[str] = None,
+                         description: Optional[str] = None) -> Any:
+    """Rename a space (its display name) and/or change its description. Owner/manager
+    only. The slug can't change: it is the space's IRI, and links, graph bindings and
+    provenance point at it. Pass only what changes; description="" clears it. Confirm
+    the new name with the user before calling."""
+    body = {k: v for k, v in (("name", name), ("description", description)) if v is not None}
+    if not body:
+        return {"error": True, "status_code": 400,
+                "detail": "pass a name, a description, or both; nothing was changed."}
+    return _patch(f"/api/spaces/{_seg(slug)}", json=body)
+
+
+@mcp.tool()
 def brainkb_delete_space(slug: str, confirm_slug: str) -> Any:
     """PERMANENTLY delete a space and everything in it. SuperAdmin only; irreversible.
 
