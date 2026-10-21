@@ -148,7 +148,10 @@ source IP — `X-Forwarded-For` / `X-Real-IP` / socket peer) plus payload guards
 a first line of defence against abuse / brute-force / floods on the hosted remote.
 It is **per-process** (each worker has its own counters) and is **not** a
 substitute for an edge proxy / WAF / API gateway for real DDoS. `stdio` (local) is
-exempt. Over-limit calls return HTTP `429` (`Retry-After` set); a full server
+exempt, and so are **Admin / SuperAdmin** callers: their access token's signature is
+verified against usermanagement's JWKS before its `roles` claim counts (an
+unverified claim is one anyone can write), and the result is remembered per
+credential — never per address — for at most 5 minutes. Over-limit calls return HTTP `429` (`Retry-After` set); a full server
 returns a retryable `503`. Tool errors carry `retryable: true` and
 `retry_after_sec`, and the landing page lists the limits so clients can pace
 themselves.
@@ -167,8 +170,8 @@ rule (e.g. 2,000 requests per 5 minutes per IP) on the ALB in front of
 | `MCP_RATELIMIT_WRITE_PER_MIN` | `40` | mutations / ingest |
 | `MCP_RATELIMIT_READ_PER_MIN` | `120` | reads |
 | `MCP_RATELIMIT_ADMIN_PER_MIN` | `30` | usermanagement admin calls |
-| `MCP_MAX_INGEST_BYTES` | `10000000` | max **raw-text** ingest size (0 = unlimited); file ingest is **not** capped |
-| `MCP_MAX_INGEST_FILES` | `50` | max files per `brainkb_ingest_files` call |
+| `MCP_MAX_INGEST_BYTES` | `10000000` | max **raw-text** ingest size (0 = unlimited; Admin / SuperAdmin exempt); file ingest is **not** capped |
+| `MCP_MAX_INGEST_FILES` | `50` | max files per `brainkb_ingest_files` call (Admin / SuperAdmin exempt) |
 | `MCP_RATELIMIT_HTTP_PER_MIN` | `600` | every HTTP request per address, before any MCP handling (`/healthz` exempt) |
 | `MCP_RATELIMIT_SESSIONS_PER_MIN` | `30` | new MCP sessions per address (each holds server memory until closed) |
 | `MCP_MAX_INFLIGHT_PER_CALLER` | `6` | tool calls one caller (credential, else address) may have running or waiting |
@@ -242,8 +245,9 @@ backend. Three inputs are therefore treated as hostile:
 | `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` and `brainkb_synthscholar_ingest` may read from |
 | `MCP_UPLOAD_ENABLED` | `true` | `POST /upload` staging endpoint (authenticated) |
 | `MCP_UPLOAD_DIR` | `<tmp>/brainkb-uploads` | where staged uploads live |
-| `MCP_UPLOAD_MAX_BYTES` | `5000000000` | 5 GB per file |
-| `MCP_UPLOAD_TOTAL_BYTES` | `20000000000` | across all staged uploads |
+| `MCP_UPLOAD_MAX_BYTES` | `5000000000` | 5 GB per file, for everyone |
+| `MCP_UPLOAD_TOTAL_BYTES` | `20000000000` | across all staged uploads (Admin / SuperAdmin exempt) |
+| `MCP_UPLOAD_DISK_RESERVE_BYTES` | `1000000000` | free disk no upload may eat into, admins included (0 disables) |
 | `MCP_UPLOAD_TTL_MIN` | `360` | stale uploads are swept |
 | `MCP_ALLOW_SHARED_IDENTITY` | `false` | Opt in to `BRAINKB_TOKEN` as an ambient identity (single-user HTTP only) |
 | `MCP_PUBLIC_HOST` | *(empty → from the request, see [Landing page address](#landing-page-address-main-vs-sandbox))* | Public hostname the landing page puts in its sample commands |

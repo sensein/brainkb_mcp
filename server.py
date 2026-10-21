@@ -65,6 +65,7 @@ import ipaddress
 import json as jsonlib
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -127,9 +128,106 @@ def _caller_key() -> str:
     """Whom to count a call against: the credential when one is sent (callers
     behind one proxy or NAT stay apart), else the source IP / session."""
     authz = _request_headers().get("authorization", "")
-    if authz:
-        return "cred:" + hashlib.sha256(authz.encode()).hexdigest()[:24]
-    return _client_id()
+    return _cred_key(authz) if authz else _client_id()
+
+
+def _cred_key(authz: str) -> str:
+    return "cred:" + hashlib.sha256(authz.encode()).hexdigest()[:24]
+
+
+# Admin / SuperAdmin callers are exempt from every limit (the per-minute buckets,
+# the per-caller and queue caps, the HTTP guard). The role is read from the
+# caller's access token only after its RS256 signature verifies against
+# usermanagement's JWKS: tokens pass through this server unverified otherwise
+# (the backend checks them), and an unverified `roles` claim is one anyone can
+# write. A verified result is remembered per credential, never per address, so
+# others behind the same IP do not inherit it; it lasts until the token expires,
+# at most _PRIV_TTL seconds, so a removed role stops counting within that time.
+_PRIVILEGED_ROLES = {"admin", "superadmin"}
+_PRIV_TTL = 300
+_PRIV_NO_TTL = 60  # a credential found not privileged is re-checked after this
+_PRIV_CACHE: Dict[str, Tuple[float, bool]] = {}  # credential key -> (monotonic expiry, privileged)
+_PRIV_LOCK = threading.Lock()
+_JWKS: Any = None
+_JWKS_DOWN_UNTIL = [0.0]  # after a failed JWKS fetch, nobody is exempt for a minute
+
+
+def _privilege_known(key: str) -> Optional[bool]:
+    """Non-blocking check for the event loop: the verdict remembered for this
+    credential, or None if there is none (yet)."""
+    with _PRIV_LOCK:
+        hit = _PRIV_CACHE.get(key)
+    return hit[1] if hit and hit[0] > time.monotonic() else None
+
+
+def _privileged_cached(key: str) -> bool:
+    return _privilege_known(key) is True
+
+
+def _remember_privilege(key: str, privileged: bool, life: float) -> None:
+    if not key.startswith("cred:") or life <= 0:
+        return
+    with _PRIV_LOCK:
+        if len(_PRIV_CACHE) >= 5000:
+            now = time.monotonic()
+            for k in [k for k, v in _PRIV_CACHE.items() if v[0] <= now] or list(_PRIV_CACHE):
+                _PRIV_CACHE.pop(k, None)
+        _PRIV_CACHE[key] = (time.monotonic() + life, privileged)
+
+
+def _verified_claims(token: str) -> Dict[str, Any]:
+    global _JWKS
+    import jwt
+
+    if _JWKS is None:
+        _JWKS = jwt.PyJWKClient(f"{_UM_URL}/.well-known/jwks.json",
+                                cache_keys=True, lifespan=600, timeout=10)
+    key = _JWKS.get_signing_key_from_jwt(token)
+    return jwt.decode(token, key.key, algorithms=["RS256"], audience=[_AUD_QUERY, _AUD_UM],
+                      options={"require": ["exp", "sub"]})
+
+
+def _privileged() -> bool:
+    """True if the current MCP caller is a verified Admin or SuperAdmin. Runs in
+    a tool thread: resolving the credential may exchange a PAT."""
+    if not _IS_REMOTE:
+        return False
+    key = _caller_key()
+    known = _privilege_known(key)
+    if known is not None:
+        return known
+    if time.monotonic() < _JWKS_DOWN_UNTIL[0]:
+        return False
+    try:
+        token = _token_for(_AUD_QUERY)["token"]
+    except Exception:
+        return False  # anonymous or unusable credential
+    return _token_privileged(token, key)
+
+
+def _token_privileged(token: str, key: str) -> bool:
+    """Verify `token` and decide whether it is an Admin/SuperAdmin's, remembering
+    the verdict under `key` (blocking: the first call may fetch the JWKS)."""
+    known = _privilege_known(key)
+    if known is not None:
+        return known
+    if time.monotonic() < _JWKS_DOWN_UNTIL[0]:
+        return False
+    try:
+        claims = _verified_claims(token)
+    except Exception as e:
+        import jwt
+
+        if isinstance(e, jwt.PyJWKClientError):  # JWKS unreachable: not the caller's fault
+            _JWKS_DOWN_UNTIL[0] = time.monotonic() + 60
+        else:
+            _remember_privilege(key, False, _PRIV_NO_TTL)
+        return False
+    if not {str(r).lower() for r in claims.get("roles") or []} & _PRIVILEGED_ROLES:
+        _remember_privilege(key, False, _PRIV_NO_TTL)
+        return False
+    _remember_privilege(key, True, min(_PRIV_TTL, float(claims["exp"]) - time.time()))
+    return True
 
 
 def _busy(detail: str, status: int) -> Dict[str, Any]:
@@ -148,7 +246,11 @@ def _tool(*dargs: Any, **dkwargs: Any) -> Any:
         async def run_in_thread(*args: Any, **kwargs: Any) -> Any:
             admit, threads = _limiter("admit"), _limiter("threads")
             key = _caller_key() if _IS_REMOTE else "local"
-            if key != "local":
+            if key.startswith("cred:") and _privilege_known(key) is None:
+                # First call with this credential: settle whether it is an admin
+                # (may exchange a PAT, so off the loop) before applying the caps.
+                await anyio.to_thread.run_sync(_privileged)
+            if key != "local" and not _privileged_cached(key):
                 if _INFLIGHT.get(key, 0) >= _INFLIGHT_PER_CALLER:
                     return _busy(f"Too many calls at once from this caller (at most "
                                  f"{_INFLIGHT_PER_CALLER}). Wait for one to finish, "
@@ -435,6 +537,8 @@ def _rate_ok(bucket: str, limit: int, cid: Optional[str] = None) -> bool:
     `cid` identifies the caller outside an MCP request (plain HTTP routes)."""
     if not _RL_ENABLED or limit <= 0:
         return True
+    if cid is None and _privileged():
+        return True  # verified Admin / SuperAdmin
     cid = cid or _client_id()
     if cid == "local":
         return True  # stdio single-user — nothing to throttle
@@ -1664,6 +1768,8 @@ _UPLOAD_MAX_BYTES = _int_env("MCP_UPLOAD_MAX_BYTES", 5_000_000_000)
 # Total across all staged uploads. The per-file cap alone does not stop a caller
 # from filling the disk with many files.
 _UPLOAD_TOTAL_BYTES = _int_env("MCP_UPLOAD_TOTAL_BYTES", 20_000_000_000)
+# Free disk an upload may not eat into, for everyone including admins (0 disables).
+_UPLOAD_DISK_RESERVE = _int_env("MCP_UPLOAD_DISK_RESERVE_BYTES", 1_000_000_000)
 _UPLOAD_TTL_MIN = _int_env("MCP_UPLOAD_TTL_MIN", 360)
 _UPLOAD_ID_RE = re.compile(r"^up_[0-9a-f]{32}$")
 
@@ -1939,7 +2045,7 @@ def brainkb_ingest_text(named_graph_iri: str, data: str,
                                "is the guard working. Do not retry by re-typing the "
                                "RDF; put the file where the server can read it "
                                "(MCP_INGEST_ROOT) and use brainkb_ingest_files.")}
-    if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
+    if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES and not _privileged():
         return {"error": True, "status_code": 413,
                 "detail": (f"Payload too large ({len(payload)} bytes > "
                            f"{_MAX_INGEST_BYTES}). Upload the file instead — "
@@ -2105,7 +2211,7 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
                          max_concurrency: int = 8) -> Any:
     """Ingest local RDF files (ttl/nt/nq/rdf/owl/jsonld/json) into a named graph.
     Returns a job_id; runs in the background — poll with brainkb_job_status."""
-    if _MAX_INGEST_FILES > 0 and len(file_paths) > _MAX_INGEST_FILES:
+    if _MAX_INGEST_FILES > 0 and len(file_paths) > _MAX_INGEST_FILES and not _privileged():
         return {"error": True, "status_code": 413,
                 "detail": f"Too many files ({len(file_paths)} > {_MAX_INGEST_FILES} per call)."}
     handles = []
@@ -2864,6 +2970,11 @@ async def _upload(request: Any) -> Any:
     # Refuse bytes the caller could never ingest. The REST insert routes are gated
     # on the `write` scope, so without it this would be staging a file solely to
     # fail later — while consuming the disk in the meantime.
+    # Admin / SuperAdmin uploads skip the staging total (the 5 GB per-file cap
+    # applies to everyone); verifying here also exempts their next requests from
+    # the HTTP guard.
+    privileged = await anyio.to_thread.run_sync(
+        _token_privileged, ctx.get("token") or "", _cred_key(authz))
     scopes = _scopes_of(ctx.get("token") or "")
     if scopes and "write" not in scopes:
         return JSONResponse({"error": True, "detail": (
@@ -2881,7 +2992,7 @@ async def _upload(request: Any) -> Any:
     os.makedirs(_UPLOAD_DIR, exist_ok=True)
     _upload_sweep()
     staged = _upload_total_bytes()
-    if _UPLOAD_TOTAL_BYTES and staged >= _UPLOAD_TOTAL_BYTES:
+    if _UPLOAD_TOTAL_BYTES and staged >= _UPLOAD_TOTAL_BYTES and not privileged:
         return JSONResponse({"error": True, "detail": (
             f"the staging area is full ({staged} bytes >= "
             f"{_UPLOAD_TOTAL_BYTES}). Ingest or discard what is already staged "
@@ -2904,6 +3015,15 @@ async def _upload(request: Any) -> Any:
                     return JSONResponse({"error": True, "detail": (
                         f"file exceeds {_UPLOAD_MAX_BYTES} bytes "
                         "(MCP_UPLOAD_MAX_BYTES)")}, 413)
+                # Not a quota (admins skip the staging total): stop before the disk fills,
+                # which would take the whole server down. Checked every ~64 MB.
+                if _UPLOAD_DISK_RESERVE and total // (64 << 20) != (total - len(chunk)) // (64 << 20) \
+                        and shutil.disk_usage(_UPLOAD_DIR).free < _UPLOAD_DISK_RESERVE:
+                    fh.close()
+                    _upload_discard(upload_id)
+                    return JSONResponse({"error": True, "detail": (
+                        "the server is running out of disk space; nothing was stored. "
+                        "Ingest or discard staged uploads, or try again later.")}, 507)
                 digest.update(chunk)
                 fh.write(chunk)
     except Exception as exc:                       # noqa: BLE001 - request boundary
@@ -3882,7 +4002,8 @@ requests.post("https://{host}/upload",
     {_RL_AUTH} sign-ins. Each caller can run {_INFLIGHT_PER_CALLER} calls at once. Past a
     limit, the server answers with a retryable error (HTTP <code>429</code>, or
     <code>503</code> when it is busy) and says how long to wait. Agents should retry after
-    that wait rather than immediately.</p></details>
+    that wait rather than immediately. Signed-in Admin and SuperAdmin accounts are not
+    limited.</p></details>
     <details><summary>Why does /mcp say "Not Acceptable" in a browser?</summary><p>That is
     the endpoint working correctly: a browser GET sends no
     <code>Accept: text/event-stream</code>, so the server refuses it. Use an MCP client.</p></details>
@@ -4010,6 +4131,10 @@ class _HttpGuard:
             from starlette.responses import JSONResponse
 
             request = Request(scope)
+            authz = request.headers.get("authorization", "")
+            if authz and _privileged_cached(_cred_key(authz)):
+                await self.app(scope, receive, send)  # verified Admin / SuperAdmin
+                return
             cid = _http_client_id(request)
             new_session = (scope.get("method") == "POST"
                            and scope.get("path", "").rstrip("/").endswith("/mcp")
