@@ -87,9 +87,9 @@ All of these read under the space's rules (public spaces need no login) and are 
 |------|--------------|
 | `brainkb_search(q, space?, limit?, offset?)` | Access-filtered full-text search |
 | `brainkb_list_registered_graphs()` | List visible registered graphs |
-| `brainkb_sparql(query)` | Arbitrary SPARQL (**admin** role) |
+| `brainkb_sparql(query, limit?, offset?)` | Arbitrary SPARQL (**admin** role). A SELECT without its own LIMIT comes back a page at a time; `page.next_offset` says where to continue (see [Concurrency & large results](#concurrency--large-results)) |
 | `brainkb_qa_list(category?, search?)` | No args: menu of QA categories with descriptions. With `category`/`search`: matching canned questions and their parameters |
-| `brainkb_qa_run(query_id, params?)` | Run a canned question; params are validated and escaped. Same role as `brainkb_sparql`. Adding queries: [guide.md](guide.md) |
+| `brainkb_qa_run(query_id, params?, limit?, offset?)` | Run a canned question; params are validated and escaped. Same role and paging as `brainkb_sparql`. Adding queries: [guide.md](guide.md) |
 | `brainkb_provenance_job(job_id)` | PROV-O bundle for a job |
 | `brainkb_provenance_graph(graph_iri)` | PROV-O history for a graph |
 | `brainkb_delta(job_id)` | Exact triples a job added |
@@ -148,7 +148,16 @@ source IP — `X-Forwarded-For` / `X-Real-IP` / socket peer) plus payload guards
 a first line of defence against abuse / brute-force / floods on the hosted remote.
 It is **per-process** (each worker has its own counters) and is **not** a
 substitute for an edge proxy / WAF / API gateway for real DDoS. `stdio` (local) is
-exempt. Over-limit calls return HTTP `429`.
+exempt. Over-limit calls return HTTP `429` (`Retry-After` set); a full server
+returns a retryable `503`. Tool errors carry `retryable: true` and
+`retry_after_sec`, and the landing page lists the limits so clients can pace
+themselves.
+
+**These limits protect the process, not the network.** A real DDoS saturates the
+load balancer or the instance before any Python runs. On AWS, put a WAF rate-based
+rule (e.g. 2,000 requests per 5 minutes per IP) on the ALB in front of
+`mcp.brainkb.org`; AWS Shield Standard is on by default. Behind nginx instead,
+`limit_req` / `limit_conn` do the same job.
 
 | Env | Default | Limits |
 |-----|---------|--------|
@@ -160,6 +169,12 @@ exempt. Over-limit calls return HTTP `429`.
 | `MCP_RATELIMIT_ADMIN_PER_MIN` | `30` | usermanagement admin calls |
 | `MCP_MAX_INGEST_BYTES` | `10000000` | max **raw-text** ingest size (0 = unlimited); file ingest is **not** capped |
 | `MCP_MAX_INGEST_FILES` | `50` | max files per `brainkb_ingest_files` call |
+| `MCP_RATELIMIT_HTTP_PER_MIN` | `600` | every HTTP request per address, before any MCP handling (`/healthz` exempt) |
+| `MCP_RATELIMIT_SESSIONS_PER_MIN` | `30` | new MCP sessions per address (each holds server memory until closed) |
+| `MCP_MAX_INFLIGHT_PER_CALLER` | `6` | tool calls one caller (credential, else address) may have running or waiting |
+| `MCP_TOOL_QUEUE_MAX` | `64` | calls that may wait for a free worker; more get a retryable `503` |
+| `MCP_TOOL_QUEUE_WAIT_SEC` | `30` | longest wait for a worker (a running call is never cut off) |
+| `MCP_MAX_CONNECTIONS` | `1000` | open connections; uvicorn answers `503` past it |
 | `MCP_RATELIMIT_MAX_KEYS` | `20000` | distinct callers tracked per window; once full, new callers are refused for the rest of the window rather than growing the map without bound |
 
 **`X-Forwarded-For` is only believed from `MCP_TRUSTED_PROXIES`** (see below). It
@@ -168,6 +183,51 @@ present a fresh identity per request — bypassing every limit including the
 brute-force bucket — and let it pin a *victim's* IP to exhaust their quota. With
 the list empty, limits key on the socket peer, which means everything arriving
 through a reverse proxy shares one bucket. Set it when you deploy behind one.
+
+## Concurrency & large results
+
+**Tool calls run in parallel.** Every tool is a blocking function, and FastMCP runs
+a blocking tool directly on the server's single event loop — so one slow call (a
+large SPARQL query, an ingest) used to stall every other session, `/healthz` and
+the OAuth pages until it finished, which looked like "MCP is not responding" with
+several clients while the host sat idle. Tools now run in a worker-thread pool;
+calls beyond `MCP_TOOL_THREADS` wait for a free slot instead of spawning more
+threads. Each call still resolves its own caller's identity.
+
+**Backend connections are reused.** All backend calls share one pooled HTTP client
+(keep-alive) instead of opening a connection per call. It stores no cookies, so
+nothing from one caller's response can reach another caller's request. A PAT or
+refresh token sent in the `Authorization` header is exchanged once and the access
+token reused for up to 5 minutes (never past its expiry), instead of one
+usermanagement round trip per tool call — which also means a revoked PAT can keep
+working here for up to 5 minutes.
+
+**Large results come back progressively.** No result is allowed to flood the
+agent's context:
+
+- `brainkb_sparql` / `brainkb_qa_run`: a `SELECT` that sets no `LIMIT`/`OFFSET` of
+  its own is sent with `LIMIT` and `OFFSET`, so the triplestore never builds an
+  unbounded answer. The response carries `page: {limit, offset, returned,
+  has_more, next_offset}`; call again with `offset=next_offset` for the next page.
+  Add `ORDER BY` for stable pages. Queries that slice themselves run as written.
+- Any tool: a result over `MCP_MAX_RESULT_BYTES` (measured as sent, i.e. indented
+  JSON) is cut to its leading rows — SPARQL bindings, a list's items, a JSON-LD
+  `@graph` — with a `truncated` note (rows returned out of how many, and how to get
+  the rest; for a SPARQL page `next_offset` moves to the first row left out). A
+  result with no rows to cut returns a text preview of its start.
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `MCP_TOOL_THREADS` | `32` | tool calls running at once |
+| `MCP_HTTP_MAX_CONNECTIONS` | `100` | pooled backend connections |
+| `MCP_HTTP_MAX_KEEPALIVE` | `20` | idle connections kept open |
+| `MCP_MAX_RESULT_BYTES` | `80000` | largest tool result (0 = no cap); keeps results under common client limits such as Claude Code's 25k tokens |
+| `MCP_SPARQL_PAGE_SIZE` | `500` | rows per page when the query sets no LIMIT and the caller passes no `limit` |
+| `MCP_SPARQL_MAX_PAGE` | `5000` | largest `limit` a caller may ask for |
+
+The server is still one process: these settings let it serve many clients at
+once, but a single heavy query still costs the triplestore what it costs. Watch
+query_service and Oxigraph when many agents run large queries together.
 
 ## Hardening the hosted remote
 
