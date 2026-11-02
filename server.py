@@ -56,21 +56,27 @@ or returned to the model.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import html
 import importlib
+import inspect
 import ipaddress
 import json as jsonlib
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
 import time
 import weakref
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
+import anyio
+import anyio.to_thread
 import httpx
 import qa_registry
 from mcp.server.fastmcp import FastMCP
@@ -88,6 +94,195 @@ mcp = FastMCP(
 )
 
 _DEFAULT_URL = os.getenv("BRAINKB_URL", "http://localhost:8010").rstrip("/")
+
+
+# Every tool below is a plain (blocking) function, and FastMCP calls a sync tool
+# directly ON the event loop. One slow backend call — a big SPARQL query, an upload
+# — then froze the whole server: every other session, /healthz and the OAuth pages
+# queued behind it, so several clients at once looked like "MCP is not responding"
+# while the host sat idle. This wrapper registers each sync tool as an async one
+# that runs the function in a worker thread instead, at most MCP_TOOL_THREADS at a
+# time (later calls wait their turn rather than piling up threads). anyio copies
+# the context into the thread, so mcp.get_context() — the caller's headers, hence
+# their identity — still resolves per call. The module-level name stays the plain
+# function, so tools calling one another directly are unchanged.
+#
+# Admission control keeps one caller (or a flood) from holding every thread: a
+# caller may have at most MCP_MAX_INFLIGHT_PER_CALLER calls running or waiting,
+# at most MCP_TOOL_QUEUE_MAX calls may wait for a thread, and none waits longer
+# than MCP_TOOL_QUEUE_WAIT_SEC. Past any of these the call is answered at once
+# with a retryable "busy" error instead of queueing without bound. All of this
+# state is only touched on the event loop, so it needs no lock.
+_LIMITERS: Dict[str, anyio.CapacityLimiter] = {}
+_INFLIGHT: Dict[str, int] = {}
+_register_tool = mcp.tool
+
+
+def _limiter(name: str) -> anyio.CapacityLimiter:
+    if name not in _LIMITERS:  # created lazily: it must belong to the running loop
+        _LIMITERS[name] = anyio.CapacityLimiter(_TOOL_THREADS)
+    return _LIMITERS[name]
+
+
+def _caller_key() -> str:
+    """Whom to count a call against: the credential when one is sent (callers
+    behind one proxy or NAT stay apart), else the source IP / session."""
+    authz = _request_headers().get("authorization", "")
+    return _cred_key(authz) if authz else _client_id()
+
+
+def _cred_key(authz: str) -> str:
+    return "cred:" + hashlib.sha256(authz.encode()).hexdigest()[:24]
+
+
+# Admin / SuperAdmin callers are exempt from every limit (the per-minute buckets,
+# the per-caller and queue caps, the HTTP guard). The role is read from the
+# caller's access token only after its RS256 signature verifies against
+# usermanagement's JWKS: tokens pass through this server unverified otherwise
+# (the backend checks them), and an unverified `roles` claim is one anyone can
+# write. A verified result is remembered per credential, never per address, so
+# others behind the same IP do not inherit it; it lasts until the token expires,
+# at most _PRIV_TTL seconds, so a removed role stops counting within that time.
+_PRIVILEGED_ROLES = {"admin", "superadmin"}
+_PRIV_TTL = 300
+_PRIV_NO_TTL = 60  # a credential found not privileged is re-checked after this
+_PRIV_CACHE: Dict[str, Tuple[float, bool]] = {}  # credential key -> (monotonic expiry, privileged)
+_PRIV_LOCK = threading.Lock()
+_JWKS: Any = None
+_JWKS_DOWN_UNTIL = [0.0]  # after a failed JWKS fetch, nobody is exempt for a minute
+
+
+def _privilege_known(key: str) -> Optional[bool]:
+    """Non-blocking check for the event loop: the verdict remembered for this
+    credential, or None if there is none (yet)."""
+    with _PRIV_LOCK:
+        hit = _PRIV_CACHE.get(key)
+    return hit[1] if hit and hit[0] > time.monotonic() else None
+
+
+def _privileged_cached(key: str) -> bool:
+    return _privilege_known(key) is True
+
+
+def _remember_privilege(key: str, privileged: bool, life: float) -> None:
+    if not key.startswith("cred:") or life <= 0:
+        return
+    with _PRIV_LOCK:
+        if len(_PRIV_CACHE) >= 5000:
+            now = time.monotonic()
+            for k in [k for k, v in _PRIV_CACHE.items() if v[0] <= now] or list(_PRIV_CACHE):
+                _PRIV_CACHE.pop(k, None)
+        _PRIV_CACHE[key] = (time.monotonic() + life, privileged)
+
+
+def _verified_claims(token: str) -> Dict[str, Any]:
+    global _JWKS
+    import jwt
+
+    if _JWKS is None:
+        _JWKS = jwt.PyJWKClient(f"{_UM_URL}/.well-known/jwks.json",
+                                cache_keys=True, lifespan=600, timeout=10)
+    key = _JWKS.get_signing_key_from_jwt(token)
+    return jwt.decode(token, key.key, algorithms=["RS256"], audience=[_AUD_QUERY, _AUD_UM],
+                      options={"require": ["exp", "sub"]})
+
+
+def _privileged() -> bool:
+    """True if the current MCP caller is a verified Admin or SuperAdmin. Runs in
+    a tool thread: resolving the credential may exchange a PAT."""
+    if not _IS_REMOTE:
+        return False
+    key = _caller_key()
+    known = _privilege_known(key)
+    if known is not None:
+        return known
+    if time.monotonic() < _JWKS_DOWN_UNTIL[0]:
+        return False
+    try:
+        token = _token_for(_AUD_QUERY)["token"]
+    except Exception:
+        return False  # anonymous or unusable credential
+    return _token_privileged(token, key)
+
+
+def _token_privileged(token: str, key: str) -> bool:
+    """Verify `token` and decide whether it is an Admin/SuperAdmin's, remembering
+    the verdict under `key` (blocking: the first call may fetch the JWKS)."""
+    known = _privilege_known(key)
+    if known is not None:
+        return known
+    if time.monotonic() < _JWKS_DOWN_UNTIL[0]:
+        return False
+    try:
+        claims = _verified_claims(token)
+    except Exception as e:
+        import jwt
+
+        if isinstance(e, jwt.PyJWKClientError):  # JWKS unreachable: not the caller's fault
+            _JWKS_DOWN_UNTIL[0] = time.monotonic() + 60
+        else:
+            _remember_privilege(key, False, _PRIV_NO_TTL)
+        return False
+    if not {str(r).lower() for r in claims.get("roles") or []} & _PRIVILEGED_ROLES:
+        _remember_privilege(key, False, _PRIV_NO_TTL)
+        return False
+    _remember_privilege(key, True, min(_PRIV_TTL, float(claims["exp"]) - time.time()))
+    return True
+
+
+def _busy(detail: str, status: int) -> Dict[str, Any]:
+    return {"error": True, "status_code": status, "retryable": True,
+            "retry_after_sec": 5, "detail": detail}
+
+
+def _tool(*dargs: Any, **dkwargs: Any) -> Any:
+    register = _register_tool(*dargs, **dkwargs)
+
+    def wrap(fn: Any) -> Any:
+        if inspect.iscoroutinefunction(fn):
+            return register(fn)
+
+        @functools.wraps(fn)
+        async def run_in_thread(*args: Any, **kwargs: Any) -> Any:
+            admit, threads = _limiter("admit"), _limiter("threads")
+            key = _caller_key() if _IS_REMOTE else "local"
+            if key.startswith("cred:") and _privilege_known(key) is None:
+                # First call with this credential: settle whether it is an admin
+                # (may exchange a PAT, so off the loop) before applying the caps.
+                await anyio.to_thread.run_sync(_privileged)
+            if key != "local" and not _privileged_cached(key):
+                if _INFLIGHT.get(key, 0) >= _INFLIGHT_PER_CALLER:
+                    return _busy(f"Too many calls at once from this caller (at most "
+                                 f"{_INFLIGHT_PER_CALLER}). Wait for one to finish, "
+                                 "then retry.", 429)
+                if admit.available_tokens == 0 and admit.statistics().tasks_waiting >= _TOOL_QUEUE_MAX:
+                    return _busy("The server is busy. Retry in a few seconds.", 503)
+            _INFLIGHT[key] = _INFLIGHT.get(key, 0) + 1
+            try:
+                # Only the wait for a slot is timed; a running call (a long ingest)
+                # is never cut off.
+                with anyio.move_on_after(_TOOL_QUEUE_WAIT) as waiting:
+                    await admit.acquire()
+                if waiting.cancelled_caught:
+                    return _busy(f"The server is busy (no free slot within "
+                                 f"{_TOOL_QUEUE_WAIT}s). Retry in a few seconds.", 503)
+                try:
+                    return await anyio.to_thread.run_sync(
+                        lambda: _cap_result(fn(*args, **kwargs)), limiter=threads)
+                finally:
+                    admit.release()
+            finally:
+                _INFLIGHT[key] -= 1
+                if not _INFLIGHT[key]:
+                    del _INFLIGHT[key]
+
+        register(run_in_thread)
+        return fn
+
+    return wrap
+
+
+mcp.tool = _tool  # type: ignore[method-assign]
 
 # Which transport we were started with. Several protections below are only correct
 # for the multi-user hosted remote (streamable-http), where callers are untrusted
@@ -198,12 +393,51 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-_RL_ENABLED = os.getenv("MCP_RATELIMIT_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+# Concurrency and admission (see _tool): tool calls running at once, calls one
+# caller may have running or waiting, calls that may wait for a slot, and how long.
+_TOOL_THREADS = max(1, _int_env("MCP_TOOL_THREADS", 32))
+_INFLIGHT_PER_CALLER = max(1, _int_env("MCP_MAX_INFLIGHT_PER_CALLER", 6))
+_TOOL_QUEUE_MAX = max(0, _int_env("MCP_TOOL_QUEUE_MAX", 64))
+_TOOL_QUEUE_WAIT = max(1, _int_env("MCP_TOOL_QUEUE_WAIT_SEC", 30))
+
+# One pooled HTTP client for every backend call. A fresh httpx.Client per call paid
+# a new connection each time and kept none for reuse under load; httpx.Client is
+# thread-safe, so the tool threads share it. Its cookie jar accepts nothing: the
+# client is shared by every caller, so a Set-Cookie on one caller's response must
+# never ride along on another caller's request.
+_HTTP = httpx.Client(
+    timeout=_TIMEOUT,
+    limits=httpx.Limits(max_connections=max(1, _int_env("MCP_HTTP_MAX_CONNECTIONS", 100)),
+                        max_keepalive_connections=max(0, _int_env("MCP_HTTP_MAX_KEEPALIVE", 20)),
+                        keepalive_expiry=30.0),
+    cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
+)
+
+# Result size guard (0 disables). An agent that asks for "everything" got the
+# whole answer in one tool result — megabytes of bindings — which overflows its
+# context and can crash the client. Above this many bytes of JSON, _cap_result
+# returns the leading rows that fit plus a note saying how to fetch the rest.
+# The default keeps a result well under common client limits (Claude Code's is
+# 25k tokens).
+_MAX_RESULT_BYTES = _int_env("MCP_MAX_RESULT_BYTES", 80_000)
+
+# SPARQL paging (see _page_sparql): rows per page when the query sets no LIMIT,
+# and the largest page a caller may ask for.
+_SPARQL_PAGE = max(1, _int_env("MCP_SPARQL_PAGE_SIZE", 500))
+_SPARQL_PAGE_MAX = max(_SPARQL_PAGE, _int_env("MCP_SPARQL_MAX_PAGE", 5000))
+
+
+_RL_ENABLED =os.getenv("MCP_RATELIMIT_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 _RL_WINDOW = max(1, _int_env("MCP_RATELIMIT_WINDOW_SEC", 60))
 _RL_READ = _int_env("MCP_RATELIMIT_READ_PER_MIN", 120)     # GET-style reads
 _RL_WRITE = _int_env("MCP_RATELIMIT_WRITE_PER_MIN", 40)    # mutations / ingest
 _RL_ADMIN = _int_env("MCP_RATELIMIT_ADMIN_PER_MIN", 30)    # usermanagement admin
 _RL_AUTH = _int_env("MCP_RATELIMIT_AUTH_PER_MIN", 8)       # register / login (brute-force)
+# HTTP layer (see _HttpGuard), ahead of any tool: every request per source IP, and
+# new MCP sessions per source IP (each one holds server memory until closed).
+_RL_HTTP = _int_env("MCP_RATELIMIT_HTTP_PER_MIN", 600)
+_RL_SESSIONS = _int_env("MCP_RATELIMIT_SESSIONS_PER_MIN", 30)
+_MAX_CONNECTIONS = _int_env("MCP_MAX_CONNECTIONS", 1000)    # open at once; then 503
 
 # Payload guards (0 disables). Bound resource use per ingest call.
 _MAX_INGEST_BYTES = _int_env("MCP_MAX_INGEST_BYTES", 10_000_000)  # per raw-text ingest
@@ -303,6 +537,8 @@ def _rate_ok(bucket: str, limit: int, cid: Optional[str] = None) -> bool:
     `cid` identifies the caller outside an MCP request (plain HTTP routes)."""
     if not _RL_ENABLED or limit <= 0:
         return True
+    if cid is None and _privileged():
+        return True  # verified Admin / SuperAdmin
     cid = cid or _client_id()
     if cid == "local":
         return True  # stdio single-user — nothing to throttle
@@ -533,7 +769,7 @@ def _sso_login(um: str, email: str, password: str) -> Optional[str]:
 def _exchange(um: str, refresh: str, audience: str) -> Optional[tuple]:
     """POST /api/auth/exchange -> (access_token, ttl_seconds), or None."""
     try:
-        r = httpx.post(f"{um}/api/auth/exchange",
+        r = _HTTP.post(f"{um}/api/auth/exchange",
                        headers={"Authorization": f"Bearer {refresh}"},
                        json={"audience": audience}, timeout=30)
         r.raise_for_status()
@@ -556,7 +792,7 @@ def _pat_exchange(um: str, pat: str, audience: str) -> Optional[tuple]:
     an opaque, revocable, long-lived credential; it is exchanged for a short-lived
     per-service access token exactly like a refresh token, but needs no browser."""
     try:
-        r = httpx.post(f"{um}/api/auth/pat/exchange",
+        r = _HTTP.post(f"{um}/api/auth/pat/exchange",
                        json={"token": pat, "audience": audience}, timeout=30)
         if r.status_code == 404:
             return None
@@ -593,6 +829,38 @@ def _store_access(sd: dict, aud: str, token: str, ttl: int) -> None:
     sd.setdefault("access", {})[aud] = (token, time.time() + ttl)
 
 
+# Exchanged header credentials. Agents and the BrainKB skills send the same PAT (or
+# refresh token) on every request, and each tool call used to exchange it again —
+# a usermanagement round trip per call, doubling backend load under many clients.
+# Keyed by a hash of the credential, so only a caller presenting the same secret
+# gets the cached access token. An entry lives at most _EXCHANGE_TTL seconds and
+# never past the access token's own expiry, which also bounds how long a revoked
+# PAT keeps working through this server.
+_EXCHANGE_CACHE: Dict[str, Tuple[float, tuple]] = {}
+_EXCHANGE_LOCK = threading.Lock()
+_EXCHANGE_TTL = 300
+_EXCHANGE_MAX = 5000
+
+
+def _cached_exchange(kind: str, exchange: Any, um: str, raw: str, audience: str) -> Optional[tuple]:
+    key = hashlib.sha256(f"{kind}\0{um}\0{audience}\0{raw}".encode()).hexdigest()
+    now = time.monotonic()
+    with _EXCHANGE_LOCK:
+        hit = _EXCHANGE_CACHE.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    ex = exchange(um, raw, audience)
+    life = min(_EXCHANGE_TTL, ex[1] - 60) if ex else 0
+    if life > 0:
+        with _EXCHANGE_LOCK:
+            if len(_EXCHANGE_CACHE) >= _EXCHANGE_MAX:
+                stale = [k for k, v in _EXCHANGE_CACHE.items() if v[0] <= now]
+                for k in stale or list(_EXCHANGE_CACHE)[:_EXCHANGE_MAX // 10]:
+                    _EXCHANGE_CACHE.pop(k, None)
+            _EXCHANGE_CACHE[key] = (now + life, ex)
+    return ex
+
+
 def _identify_raw(raw: str, base: str, audience: str = "") -> Dict[str, str]:
     """Auth context for one bearer token, independent of the MCP request context.
 
@@ -608,14 +876,14 @@ def _identify_raw(raw: str, base: str, audience: str = "") -> Dict[str, str]:
     # A Personal Access Token is opaque (not a JWT); exchange it for the requested
     # service audience — one PAT unlocks every service.
     if _is_pat(raw):
-        ex = _pat_exchange(um, raw, audience)
+        ex = _cached_exchange("pat", _pat_exchange, um, raw, audience)
         if ex:
             return {"url": base, "token": ex[0], "email": _decode_sub(ex[0]) or ""}
         raise _NotAuthed(f"Could not exchange the provided access token for '{audience}' "
                          "(it may be expired or revoked).")
     cl = _claims(raw)
     if cl.get("typ") == "refresh" or cl.get("aud") == "brainkb-auth":
-        ex = _exchange(um, raw, audience)
+        ex = _cached_exchange("refresh", _exchange, um, raw, audience)
         if ex:
             return {"url": base, "token": ex[0], "email": cl.get("sub") or ""}
         raise _NotAuthed(f"Could not exchange the provided refresh token for '{audience}'.")
@@ -789,6 +1057,110 @@ def _result(resp: httpx.Response) -> Any:
     return {"error": True, "status_code": resp.status_code, "detail": body}
 
 
+def _json_size(value: Any) -> int:
+    """Bytes of `value` as FastMCP sends it: JSON indented by 2 (func_metadata's
+    pydantic_core.to_json(..., indent=2)) — about half again the compact size."""
+    return len(jsonlib.dumps(value, default=str, ensure_ascii=False, indent=2).encode())
+
+
+def _largest_list(value: Any, path: Tuple[Any, ...] = (), depth: int = 0) -> Tuple[Tuple[Any, ...], Optional[list]]:
+    """(path, list) of the biggest list in a result, looking a few levels down —
+    the rows of a response: SPARQL bindings, a list endpoint's items, @graph."""
+    if isinstance(value, list):
+        return path, value
+    best: Tuple[Tuple[Any, ...], Optional[list]] = ((), None)
+    if isinstance(value, dict) and depth < 3:
+        best_size = -1
+        for k, v in value.items():
+            p, lst = _largest_list(v, path + (k,), depth + 1)
+            if lst is not None:
+                size = _json_size(lst)
+                if size > best_size:
+                    best, best_size = (p, lst), size
+    return best
+
+
+def _replace_at(value: Any, path: Tuple[Any, ...], new: Any) -> Any:
+    """Copy of `value` with the item at `path` replaced. Copies only the dicts
+    along the path: a result may be shared (a cached registry entry), so it is
+    never modified in place."""
+    if not path:
+        return new
+    out = dict(value)
+    out[path[0]] = _replace_at(value[path[0]], path[1:], new)
+    return out
+
+
+def _cap_result(result: Any) -> Any:
+    """Keep a tool result under MCP_MAX_RESULT_BYTES of JSON.
+
+    The rows of the result (its largest list) are cut to the leading ones that
+    fit, and a `truncated` note says how many came back out of how many and how
+    to get the rest. A SPARQL page (see _page_sparql) also gets its next_offset
+    moved to the first row left out, so paging on picks up exactly there. With no
+    list to cut, a text preview of the start is returned instead."""
+    if _MAX_RESULT_BYTES <= 0:
+        return result
+    try:
+        size = _json_size(result)
+    except Exception:
+        return result
+    if size <= _MAX_RESULT_BYTES:
+        return result
+
+    budget = _MAX_RESULT_BYTES - 1000  # room for the note
+    path, rows = _largest_list(result)
+    if rows:
+        keep, used = 0, _json_size(_replace_at(result, path, []))
+        for row in rows:
+            used += _json_size(row) + 2
+            if used > budget:
+                break
+            keep += 1
+        # Rows sized on their own miss the indentation they get nested in the
+        # response, so check the real size and trim further if needed.
+        out = result
+        while keep:
+            out = _replace_at(result, path, rows[:keep])
+            actual = _json_size(out)
+            if actual <= budget:
+                break
+            keep = min(keep - 1, keep * budget // actual)
+        if keep:
+            note = {
+                "truncated": True, "returned": keep, "total": len(rows),
+                "bytes": size, "limit_bytes": _MAX_RESULT_BYTES,
+                "hint": (f"Only the first {keep} of {len(rows)} rows fit in one result. "
+                         "Ask for less: a narrower query, a smaller limit, or the next "
+                         "page with offset."),
+            }
+            if not isinstance(out, dict):
+                return {"items": out, **note}
+            page = out.get("page")
+            if isinstance(page, dict) and isinstance(page.get("offset"), int):
+                out["page"] = {**page, "returned": keep, "has_more": True,
+                               "next_offset": page["offset"] + keep}
+                note["hint"] = (f"Only the first {keep} of {len(rows)} rows fit in one "
+                                f"result. Fetch the rest from offset={page['offset'] + keep}, "
+                                "or ask for a smaller limit.")
+            out["truncated"] = note
+            return out
+
+    text = jsonlib.dumps(result, default=str, ensure_ascii=False)
+    cut = budget
+    while True:
+        out = {
+            "truncated": True, "bytes": size, "limit_bytes": _MAX_RESULT_BYTES,
+            "preview": text.encode()[:cut].decode(errors="ignore"),
+            "hint": "The result is too large for one response; this is its beginning. "
+                    "Ask for a narrower slice of the data.",
+        }
+        actual = _json_size(out)  # the preview's quotes and newlines get escaped
+        if actual <= _MAX_RESULT_BYTES or cut <= 0:
+            return out
+        cut = min(cut - 1, cut * budget // actual)
+
+
 # The ONLY backend paths an unauthenticated caller may reach, all read-only GETs
 # the backend itself serves anonymously (public spaces). Anonymous access is
 # GET-only by construction (_post/_put/_delete/_um never fall back), and this
@@ -832,8 +1204,7 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None, *,
                 raise
             base = _allowed_base(_request_headers().get("x-brainkb-base-url"))
             headers, is_anon = {}, True
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.get(f"{base}{path}", params=params or {}, headers=headers)
+        resp = _HTTP.get(f"{base}{path}", params=params or {}, headers=headers)
         out = _result(resp)
         if is_anon and isinstance(out, dict) and out.get("error") \
                 and resp.status_code in (401, 403):
@@ -861,9 +1232,9 @@ def _post(path: str, params: Optional[Dict[str, Any]] = None,
         headers = {"Authorization": f"Bearer {ctx['token']}"}
         if ctype:
             headers["Content-Type"] = ctype
-        with httpx.Client(timeout=timeout or _TIMEOUT) as c:
-            resp = c.post(f"{ctx['url']}{path}", params=params or {}, headers=headers,
-                          json=json, content=content, files=files, data=data)
+        resp = _HTTP.post(f"{ctx['url']}{path}", params=params or {}, headers=headers,
+                          json=json, content=content, files=files, data=data,
+                          timeout=timeout or _TIMEOUT)
         return _result(resp)
     except _NotAuthed as e:
         return {"error": True, "detail": str(e)}
@@ -878,8 +1249,7 @@ def _patch(path: str, json: Any = None) -> Any:
         return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.patch(f"{ctx['url']}{path}",
+        resp = _HTTP.patch(f"{ctx['url']}{path}",
                            headers={"Authorization": f"Bearer {ctx['token']}"}, json=json)
         return _result(resp)
     except _NotAuthed as e:
@@ -896,9 +1266,9 @@ def _delete(path: str, params: Optional[Dict[str, Any]] = None,
         return _rl_error("write", _RL_WRITE)
     try:
         ctx = _resolve()
-        with httpx.Client(timeout=timeout or _TIMEOUT) as c:
-            resp = c.delete(f"{ctx['url']}{path}", params=params,
-                            headers={"Authorization": f"Bearer {ctx['token']}"})
+        resp = _HTTP.delete(f"{ctx['url']}{path}", params=params,
+                            headers={"Authorization": f"Bearer {ctx['token']}"},
+                            timeout=timeout or _TIMEOUT)
         return _result(resp)
     except _NotAuthed as e:
         return {"error": True, "detail": str(e)}
@@ -927,8 +1297,7 @@ def _um(method: str, path: str, json: Any = None, params: Any = None, _retry: bo
         return {"error": True, "detail": str(e)}
     try:
         ctx = _token_for(_AUD_UM)
-        with httpx.Client(timeout=_TIMEOUT) as c:
-            resp = c.request(method, f"{um}{path}",
+        resp = _HTTP.request(method, f"{um}{path}",
                              headers={"Authorization": f"Bearer {ctx['token']}"}, json=json, params=params)
         if resp.status_code == 401 and _retry:
             # The access token may have expired — drop the cached usermanagement
@@ -1399,6 +1768,8 @@ _UPLOAD_MAX_BYTES = _int_env("MCP_UPLOAD_MAX_BYTES", 5_000_000_000)
 # Total across all staged uploads. The per-file cap alone does not stop a caller
 # from filling the disk with many files.
 _UPLOAD_TOTAL_BYTES = _int_env("MCP_UPLOAD_TOTAL_BYTES", 20_000_000_000)
+# Free disk an upload may not eat into, for everyone including admins (0 disables).
+_UPLOAD_DISK_RESERVE = _int_env("MCP_UPLOAD_DISK_RESERVE_BYTES", 1_000_000_000)
 _UPLOAD_TTL_MIN = _int_env("MCP_UPLOAD_TTL_MIN", 360)
 _UPLOAD_ID_RE = re.compile(r"^up_[0-9a-f]{32}$")
 
@@ -1674,7 +2045,7 @@ def brainkb_ingest_text(named_graph_iri: str, data: str,
                                "is the guard working. Do not retry by re-typing the "
                                "RDF; put the file where the server can read it "
                                "(MCP_INGEST_ROOT) and use brainkb_ingest_files.")}
-    if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES:
+    if _MAX_INGEST_BYTES > 0 and len(payload) > _MAX_INGEST_BYTES and not _privileged():
         return {"error": True, "status_code": 413,
                 "detail": (f"Payload too large ({len(payload)} bytes > "
                            f"{_MAX_INGEST_BYTES}). Upload the file instead — "
@@ -1840,7 +2211,7 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
                          max_concurrency: int = 8) -> Any:
     """Ingest local RDF files (ttl/nt/nq/rdf/owl/jsonld/json) into a named graph.
     Returns a job_id; runs in the background — poll with brainkb_job_status."""
-    if _MAX_INGEST_FILES > 0 and len(file_paths) > _MAX_INGEST_FILES:
+    if _MAX_INGEST_FILES > 0 and len(file_paths) > _MAX_INGEST_FILES and not _privileged():
         return {"error": True, "status_code": 413,
                 "detail": f"Too many files ({len(file_paths)} > {_MAX_INGEST_FILES} per call)."}
     handles = []
@@ -2126,15 +2497,78 @@ def brainkb_list_registered_graphs() -> Any:
     return _get("/api/query/registered-named-graphs")
 
 
-@mcp.tool()
-def brainkb_sparql(sparql_query: str) -> Any:
-    """Run an arbitrary SPARQL query. Requires an Admin/SuperAdmin role (the
-    sparql_admin capability) — for ordinary questions prefer brainkb_search,
-    brainkb_read_space, or the provenance/delta tools, which need no admin role."""
+def _sparql_skeleton(query: str) -> str:
+    """The query with IRIs, string literals and comments blanked out, so keyword
+    checks are not fooled by an IRI such as <http://x.org/select/> or a '#' in one."""
+    q = re.sub(r"<[^<>\s]*>", "<>", query)
+    q = re.sub(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'', '""', q)
+    return re.sub(r"#[^\n]*", "", q)
+
+
+_SPARQL_FORM = re.compile(r"\b(SELECT|CONSTRUCT|ASK|DESCRIBE)\b(?!\s*:)", re.I)
+_SPARQL_SLICED = re.compile(r"\b(LIMIT|OFFSET)\s+\d+", re.I)
+_SPARQL_TRAILING_VALUES = re.compile(r"\}\s*VALUES\b[^}]*\}\s*$", re.I | re.S)
+_SPARQL_ORDERED = re.compile(r"\bORDER\s+BY\b", re.I)
+
+
+def _page_sparql(query: str, limit: int, offset: int) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """(query to send, page) — fetch a SELECT one page at a time.
+
+    A SELECT that sets no LIMIT/OFFSET of its own gets `LIMIT limit+1 OFFSET
+    offset` appended (the extra row only tells whether another page exists), so
+    the triplestore never materialises an unbounded result. Queries that slice
+    themselves, non-SELECT forms and a trailing VALUES block go out unchanged
+    (page None); _cap_result still bounds what comes back."""
+    skel = _sparql_skeleton(query)
+    form = _SPARQL_FORM.search(skel)
+    if (not form or form.group(1).upper() != "SELECT" or _SPARQL_SLICED.search(skel)
+            or _SPARQL_TRAILING_VALUES.search(skel)):
+        return query, None
+    limit = _SPARQL_PAGE if limit <= 0 else min(limit, _SPARQL_PAGE_MAX)
+    offset = max(0, offset)
+    page = {"limit": limit, "offset": offset, "ordered": bool(_SPARQL_ORDERED.search(skel))}
+    return f"{query.rstrip()}\nLIMIT {limit + 1} OFFSET {offset}", page
+
+
+def _run_sparql(query: str, limit: int = 0, offset: int = 0) -> Any:
+    sent, page = _page_sparql(query, limit, offset)
     # query_service declares this route WITH a trailing slash, so the guard has to
     # tolerate the final empty segment here (it is literal, not interpolated).
-    return _get("/api/query/sparql/", params={"sparql_query": sparql_query},
-                allow_trailing_slash=True)
+    out = _get("/api/query/sparql/", params={"sparql_query": sent}, allow_trailing_slash=True)
+    if page is None or not isinstance(out, dict):
+        return out
+    rows = ((out.get("message") or {}).get("results") or {}).get("bindings") \
+        if isinstance(out.get("message"), dict) else None
+    if not isinstance(rows, list):
+        return out
+    has_more = len(rows) > page["limit"]
+    rows = rows[:page["limit"]]
+    out = _replace_at(out, ("message", "results", "bindings"), rows)
+    info: Dict[str, Any] = {"limit": page["limit"], "offset": page["offset"],
+                            "returned": len(rows), "has_more": has_more,
+                            "next_offset": page["offset"] + len(rows) if has_more else None}
+    if has_more:
+        info["hint"] = "More rows: call again with offset=next_offset."
+        if not page["ordered"]:
+            info["hint"] += " Add ORDER BY to the query so pages neither repeat nor skip rows."
+    out["page"] = info
+    return out
+
+
+@mcp.tool()
+def brainkb_sparql(sparql_query: str, limit: int = 0, offset: int = 0) -> Any:
+    """Run an arbitrary SPARQL query. Requires an Admin/SuperAdmin role (the
+    sparql_admin capability) — for ordinary questions prefer brainkb_search,
+    brainkb_read_space, or the provenance/delta tools, which need no admin role.
+
+    Large results come back a page at a time. A SELECT without its own
+    LIMIT/OFFSET returns at most `limit` rows (0 = the server's page size, 500 by
+    default) starting at `offset`; the response's `page` says whether there is
+    more (`has_more`) and where to continue (`next_offset`). Add ORDER BY for
+    stable pages. A query that sets its own LIMIT runs as written. Any result
+    too big for one response is cut to its leading rows with a `truncated` note.
+    Prefer COUNT(*) first when you only need to know how much there is."""
+    return _run_sparql(sparql_query, limit, offset)
 
 
 # --------------------------------------------------------------------------- #
@@ -2180,11 +2614,13 @@ def brainkb_qa_list(category: str = "", search: str = "") -> Any:
 
 
 @mcp.tool()
-def brainkb_qa_run(query_id: str, params: Optional[Dict[str, Any]] = None) -> Any:
+def brainkb_qa_run(query_id: str, params: Optional[Dict[str, Any]] = None,
+                   limit: int = 0, offset: int = 0) -> Any:
     """Run a canned question from brainkb_qa_list by id. `params` maps parameter
     names to values; they are validated and escaped, never spliced in raw. Runs
     through the same SPARQL endpoint as brainkb_sparql, so it needs the same
-    role."""
+    role. Results page the same way: a query without its own LIMIT returns
+    `limit` rows from `offset`, and `page.next_offset` says where to continue."""
     q = qa_registry.get(query_id)
     if q is None:
         return {"error": True, "status_code": 404,
@@ -2193,8 +2629,7 @@ def brainkb_qa_run(query_id: str, params: Optional[Dict[str, Any]] = None) -> An
         sparql = q.render(params)
     except ValueError as e:
         return {"error": True, "status_code": 400, "detail": str(e)}
-    return _get("/api/query/sparql/", params={"sparql_query": sparql},
-                allow_trailing_slash=True)
+    return _run_sparql(sparql, limit, offset)
 
 
 # --------------------------------------------------------------------------- #
@@ -2523,7 +2958,8 @@ async def _upload(request: Any) -> Any:
                 "that identity and only it can ingest them.")},
             401, headers={"WWW-Authenticate": "Bearer"})
     try:
-        ctx = _identify_raw(authz[7:].strip(), _DEFAULT_URL)
+        # A PAT is exchanged over the network: off the event loop, like the tools.
+        ctx = await anyio.to_thread.run_sync(_identify_raw, authz[7:].strip(), _DEFAULT_URL)
     except _NotAuthed as exc:
         return JSONResponse({"error": True, "detail": str(exc)}, 401)
     email = (ctx.get("email") or "").strip()
@@ -2534,6 +2970,11 @@ async def _upload(request: Any) -> Any:
     # Refuse bytes the caller could never ingest. The REST insert routes are gated
     # on the `write` scope, so without it this would be staging a file solely to
     # fail later — while consuming the disk in the meantime.
+    # Admin / SuperAdmin uploads skip the staging total (the 5 GB per-file cap
+    # applies to everyone); verifying here also exempts their next requests from
+    # the HTTP guard.
+    privileged = await anyio.to_thread.run_sync(
+        _token_privileged, ctx.get("token") or "", _cred_key(authz))
     scopes = _scopes_of(ctx.get("token") or "")
     if scopes and "write" not in scopes:
         return JSONResponse({"error": True, "detail": (
@@ -2551,7 +2992,7 @@ async def _upload(request: Any) -> Any:
     os.makedirs(_UPLOAD_DIR, exist_ok=True)
     _upload_sweep()
     staged = _upload_total_bytes()
-    if _UPLOAD_TOTAL_BYTES and staged >= _UPLOAD_TOTAL_BYTES:
+    if _UPLOAD_TOTAL_BYTES and staged >= _UPLOAD_TOTAL_BYTES and not privileged:
         return JSONResponse({"error": True, "detail": (
             f"the staging area is full ({staged} bytes >= "
             f"{_UPLOAD_TOTAL_BYTES}). Ingest or discard what is already staged "
@@ -2574,6 +3015,15 @@ async def _upload(request: Any) -> Any:
                     return JSONResponse({"error": True, "detail": (
                         f"file exceeds {_UPLOAD_MAX_BYTES} bytes "
                         "(MCP_UPLOAD_MAX_BYTES)")}, 413)
+                # Not a quota (admins skip the staging total): stop before the disk fills,
+                # which would take the whole server down. Checked every ~64 MB.
+                if _UPLOAD_DISK_RESERVE and total // (64 << 20) != (total - len(chunk)) // (64 << 20) \
+                        and shutil.disk_usage(_UPLOAD_DIR).free < _UPLOAD_DISK_RESERVE:
+                    fh.close()
+                    _upload_discard(upload_id)
+                    return JSONResponse({"error": True, "detail": (
+                        "the server is running out of disk space; nothing was stored. "
+                        "Ingest or discard staged uploads, or try again later.")}, 507)
                 digest.update(chunk)
                 fh.write(chunk)
     except Exception as exc:                       # noqa: BLE001 - request boundary
@@ -3538,6 +3988,22 @@ requests.post("https://{host}/upload",
               data=open("review.ttl", "rb"))   # streamed off disk</pre>
     </div>
     </details>
+    <details><summary>How much data comes back at once?</summary><p>Large answers come
+    back a page at a time, so they never flood your agent. A SPARQL or ready-made question
+    without its own <code>LIMIT</code> returns {_SPARQL_PAGE} rows per page (ask for up to
+    {_SPARQL_PAGE_MAX} with <code>limit</code>); the answer's <code>page.next_offset</code>
+    says where the next page starts, and <code>ORDER BY</code> keeps pages stable. Any
+    answer larger than about {_MAX_RESULT_BYTES // 1000}&nbsp;kB is cut to its first rows,
+    with a <code>truncated</code> note saying how to fetch the rest. For a count, ask for
+    <code>COUNT(*)</code> first.</p></details>
+    <details><summary>Are there usage limits?</summary><p>Yes, so that one client cannot
+    slow the service down for everyone. Per address, per minute: {_RL_HTTP} requests,
+    {_RL_SESSIONS} new connections, {_RL_READ} reads, {_RL_WRITE} changes and
+    {_RL_AUTH} sign-ins. Each caller can run {_INFLIGHT_PER_CALLER} calls at once. Past a
+    limit, the server answers with a retryable error (HTTP <code>429</code>, or
+    <code>503</code> when it is busy) and says how long to wait. Agents should retry after
+    that wait rather than immediately. Signed-in Admin and SuperAdmin accounts are not
+    limited.</p></details>
     <details><summary>Why does /mcp say "Not Acceptable" in a browser?</summary><p>That is
     the endpoint working correctly: a browser GET sends no
     <code>Accept: text/event-stream</code>, so the server refuses it. Use an MCP client.</p></details>
@@ -3644,6 +4110,63 @@ async def _healthz(request: Any) -> Any:
     return PlainTextResponse("ok\n", headers={"Cache-Control": "no-store"})
 
 
+class _HttpGuard:
+    """ASGI middleware: per-source-IP request limits before any MCP handling.
+
+    The tool buckets only see calls that reach a tool; an anonymous flood of
+    session handshakes, landing-page loads or OAuth pages never got that far,
+    and every new session holds server memory until it is closed. This counts
+    every request (MCP_RATELIMIT_HTTP_PER_MIN) and, separately, new sessions — a
+    POST to /mcp without an Mcp-Session-Id (MCP_RATELIMIT_SESSIONS_PER_MIN) —
+    and answers 429 with Retry-After past either. /healthz is exempt so a load
+    balancer never marks the target unhealthy because of someone else's flood.
+    Pure ASGI, so streamed responses pass through unbuffered."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope.get("path") != "/healthz":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+
+            request = Request(scope)
+            authz = request.headers.get("authorization", "")
+            if authz and _privileged_cached(_cred_key(authz)):
+                await self.app(scope, receive, send)  # verified Admin / SuperAdmin
+                return
+            cid = _http_client_id(request)
+            new_session = (scope.get("method") == "POST"
+                           and scope.get("path", "").rstrip("/").endswith("/mcp")
+                           and "mcp-session-id" not in request.headers)
+            limited = None
+            if not _rate_ok("http", _RL_HTTP, cid):
+                limited = ("requests", _RL_HTTP)
+            elif new_session and not _rate_ok("session", _RL_SESSIONS, cid):
+                limited = ("new sessions", _RL_SESSIONS)
+            if limited:
+                what, limit = limited
+                response = JSONResponse(
+                    {"error": True, "status_code": 429, "retryable": True,
+                     "detail": f"Too many {what} from this address (at most {limit} per "
+                               f"{_RL_WINDOW}s). Retry after the window resets."},
+                    429, headers={"Retry-After": str(_RL_WINDOW)})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _serve_http() -> None:
+    """mcp.run(transport="streamable-http"), plus the HTTP guard and a cap on open
+    connections (uvicorn answers 503 past MCP_MAX_CONNECTIONS)."""
+    import uvicorn
+
+    uvicorn.run(_HttpGuard(mcp.streamable_http_app()),
+                host=mcp.settings.host, port=mcp.settings.port,
+                log_level=mcp.settings.log_level.lower(),
+                limit_concurrency=_MAX_CONNECTIONS if _MAX_CONNECTIONS > 0 else None)
+
+
 def _startup_warnings() -> None:
     """Surface deployment settings that weaken the multi-user guarantees."""
     if not _IS_REMOTE:
@@ -3688,6 +4211,6 @@ if __name__ == "__main__":
     # hosted remote (behind TLS at https://mcp.brainkb.org/mcp) — used later.
     _startup_warnings()
     if _IS_REMOTE:
-        mcp.run(transport="streamable-http")
+        _serve_http()
     else:
         mcp.run()

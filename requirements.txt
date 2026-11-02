@@ -8,4 +8,6 @@ mcp>=1.25.0,<2
 # Fernet for oauth_server.py's stateless auth codes and refresh tokens.
 cryptography>=42
 httpx>=0.27.0,<1
+# Worker threads for the blocking tools (server.py _tool); already a dependency of mcp.
+anyio>=4,<5
 uvicorn>=0.29.0,<1

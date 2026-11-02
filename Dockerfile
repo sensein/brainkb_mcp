@@ -8,7 +8,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# eMudhra/emSign CA incident (October 2026): the emSign root was distrusted, and pip
+# below 26.2.2 still trusts it through its own vendored certifi, alongside the system
+# store — so pip's TLS to PyPI could be intercepted. Before anything else is
+# downloaded, install the fixed pip and certifi from pinned wheels, hash-checked, so
+# even a tampered response is refused. Advisory:
+# https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576
+RUN printf '%s\n' \
+      'pip==26.2.2 --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70' \
+      'certifi==2026.10.19 --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b' \
+      > /tmp/ca-fix.txt \
+    && pip install --no-cache-dir --require-hashes -r /tmp/ca-fix.txt \
+    && rm /tmp/ca-fix.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "import certifi, pip; from pip._vendor import certifi as vc; \
+assert tuple(map(int, pip.__version__.split('.')[:3])) >= (26, 2, 2), pip.__version__; \
+assert certifi.__version__ >= '2026.10.19' and vc.__version__ >= '2026.10.19', (certifi.__version__, vc.__version__)"
 
 COPY server.py server.json qa_registry.py named_entities_qa.py resources_qa.py resource_entity_bridge_qa.py oauth_server.py brainkb_logo.png ./
 
