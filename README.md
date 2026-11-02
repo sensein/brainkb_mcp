@@ -44,14 +44,15 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 |------|--------------|
 | `brainkb_list_spaces()` | List spaces you can see (yours + public) |
 | `brainkb_create_space(slug, name, visibility, description?, space_type?)` | Create a workspace — `space_type` `individual` (write-capable role) or `team` (Admin/granted) |
-| `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager) |
+| `brainkb_update_space(slug, name?, description?, new_slug?)` | Rename a space, change its description, or give it a new slug (owner/manager). A new slug moves the graphs named after the old one; the old slug and IRIs stay as aliases |
+| `brainkb_set_space_visibility(slug, visibility)` | Flip private/public (owner/manager). Making a space public makes all its subspaces public; a subspace of a public space can't be private; under a private space each subspace chooses |
 | `brainkb_create_space(..., parent_slug=…)` | Create a **subspace** (any depth). Needs manage rights on the parent; parent members get the same roles in it |
 | `brainkb_get_space(slug)` | One space's details: graphs, members (direct and inherited), parent, ancestors, subspaces, your role |
 | `brainkb_space_tree(slug)` | A space and all its subspaces, nested, with your role in each |
 | `brainkb_list_writable_spaces()` | Spaces you can ingest into (same checks as ingestion), with their graphs; use it to pick an ingest target |
 | `brainkb_add_space_member(slug, email, role)` | Manage members (owner/manager) |
 | `brainkb_add_space_graph(slug, graph_iri, description?)` | Register + bind a graph to a space |
-| `brainkb_delete_space(slug, confirm_slug)` | **SuperAdmin only, irreversible.** Delete a space and everything in it: its graphs, their ingestion-history (delta) graphs, registry entries, members, access rules and search entries. The deletion is recorded in provenance. `confirm_slug` must equal `slug` |
+| `brainkb_delete_space(slug, confirm_slug)` | **SuperAdmin only, irreversible.** Delete a space and everything in it: its graphs, their ingestion-history (delta) graphs, registry entries, members, access rules, search entries and SynthScholar reviews — and every subspace below it, the same way. Each deletion is recorded in provenance. `confirm_slug` must equal `slug` |
 | `brainkb_read_space(slug)` | Read a space's RDF (JSON-LD) |
 
 ### Ingest & jobs
@@ -63,6 +64,23 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_ingest_files(graph_iri, [paths], max_concurrency?)` | Ingest RDF files (TTL/JSON-LD/…) → `job_id`. Streams large uploads (up to ~5 GB/user); no byte cap, only a file-count cap |
 | `brainkb_list_jobs(limit?)` / `brainkb_job_status(job_id)` | Ingest status |
 | `brainkb_recover_job(job_id)` | Recover a stuck/errored job |
+
+### SynthScholar reviews
+A SynthScholar run's output directory is ingested like any other data — into a space, as you, under the space's write rules — and read under its read rules.
+
+| Tool | What it does |
+|------|--------------|
+| `brainkb_synthscholar_ingest(output_dir, space_slug)` | Ingest a run's **output directory** (holding `review.json` and `review.ttl`) into a space (owner/editor). A review is unique per space — the same run can go into several. Its graph `https://brainkb.org/synthscholar/<space>/reviews/<protocol.review_id>/` is registered in the space; `review.ttl` plus an import record (PROV-O: who, when, every kept file with media type, size, sha256, what was left out) are ingested as a job → `job_id`. Everything but `work/` is kept for the review's page. Once per review per space (409 after). Reads the MCP server's filesystem, like `brainkb_ingest_files` (`MCP_INGEST_ROOT`) |
+| `brainkb_synthscholar_list_reviews(space?, q?)` | Ingested reviews you can read (public spaces: anyone); `q` matches title or research question |
+| `brainkb_synthscholar_get_review(review_id)` | One review: graph, space, files kept, the run's search log and verification, screening basis, full-text retrieval |
+| `brainkb_synthscholar_studies(review_id, q?, full_text?, source?, rob?, year_from?, year_to?, with_abstract?)` | Included studies, filtered — e.g. read from the abstract only (`full_text=false`), via EZproxy, high risk of bias |
+| `brainkb_synthscholar_screening(review_id, stage?, decision?, assessed_on?, reason?, q?, pmid?)` | The screening audit trail, filtered, with counts by stage/decision, what decisions were judged on, and exclusion reasons by criterion (`EC2` …) |
+| `brainkb_synthscholar_evidence(review_id, q?, claim?, pmid?, grounded?)` | Evidence spans behind the review's claims, and whether each quote was matched in the source |
+| `brainkb_synthscholar_records(review_id, kind, q?, study?, fields?)` | Per-study `charting` answers, critical `appraisal` by domain, or `narrative` rows; `q` searches the answers (e.g. "neo4j") |
+| `brainkb_synthscholar_text(review_id, section?)` | The review's own text: abstract, introduction, synthesis, bias, limitations, conclusions, search queries, per-group analysis |
+| `brainkb_synthscholar_find_study(doi?, pmid?, title?)` | Which reviews you can read include or screened a study, and what happened to it in each |
+
+All of these read under the space's rules (public spaces need no login) and are paged (`total`, ≤200 per call). Each takes an optional `space`: needed only when the same review is in several spaces you can read (the 409 names them).
 
 ### Read / search / provenance
 | Tool | What it does |
@@ -77,6 +95,17 @@ Authorization is enforced **server-side** (roles → capabilities → space memb
 | `brainkb_delta(job_id)` | Exact triples a job added |
 | `brainkb_delta_history(graph_iri)` | A graph's change history |
 | `brainkb_delta_compare(job_a, job_b)` | Diff two jobs' deltas |
+
+QA categories: `named_entities` (entities, mentions, mappings, claims, extraction
+audit), `resources` (the resource catalogue: scope, assumptions, versions,
+maintenance) and `resource_entity_bridge` (questions that span both, when the two
+exports live in different named graphs — scope against the entities a paper
+actually grounds, shared evidence passages, and cross-graph provenance such as
+whether both pipelines read the same document version). Bridge queries take two
+graph parameters, `resource_graph` and `entity_graph`; `rb_paired_graphs` finds
+which pair holds both halves. Offline check against Turtle exports:
+`test_qa_queries.py` (see [guide.md](guide.md)). Example questions to ask, and
+which query each one routes to: [resource_entity_bridge_questions.md](resource_entity_bridge_questions.md).
 
 ### Authorization / RBAC (query_service)
 | Tool | What it does |
@@ -150,7 +179,7 @@ backend. Three inputs are therefore treated as hostile:
 |-----|---------|----------------|
 | `MCP_ALLOWED_BASE_URLS` | *(only `BRAINKB_URL`)* | Backends a caller may select via the `X-BrainKB-Base-URL` header or a tool's `base_url` argument |
 | `MCP_TRUSTED_PROXIES` | *(empty)* | Peers whose `X-Forwarded-For` / `X-Real-IP` is believed |
-| `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` may read from |
+| `MCP_INGEST_ROOT` | *(unset → file ingest disabled on http)* | Directory `brainkb_ingest_files` and `brainkb_synthscholar_ingest` may read from |
 | `MCP_UPLOAD_ENABLED` | `true` | `POST /upload` staging endpoint (authenticated) |
 | `MCP_UPLOAD_DIR` | `<tmp>/brainkb-uploads` | where staged uploads live |
 | `MCP_UPLOAD_MAX_BYTES` | `5000000000` | 5 GB per file |

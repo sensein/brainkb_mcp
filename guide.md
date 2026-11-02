@@ -329,6 +329,50 @@ time out and return more data than the model can use.
    COPY server.py server.json qa_registry.py named_entities_qa.py cell_types_qa.py ./
    ```
 
+## Cross-graph queries (joining two kinds of export)
+
+structsense writes resource records and named-entity records into different
+named graphs, often in different spaces, so a question that spans both has to
+read two graphs in one query. `resource_entity_bridge_qa.py` is the worked
+example; copy its shape rather than inventing another.
+
+1. **Two graph parameters, not one.** Name them for the data, not the position —
+   `resource_graph` and `entity_graph` — each with the usual default and a
+   `notes` line telling the agent where to get the real IRI. Say in the category
+   description that every query takes both, and provide a discovery query
+   (`rb_paired_graphs`) that finds which pair actually shares papers. Passing
+   the same IRI twice must still work, for the case where one graph holds both.
+
+2. **Join on something both exports mint identically.** The publication node is
+   the reliable key: both sides derive the same IRI from the DOI and carry
+   `ner:doi`. The document version (`ner:checksum`), ontology term IRIs and
+   quoted evidence text are the other real bridges. Matching on a label or a
+   resource name is a heuristic — say so in `notes`, because the agent cannot
+   see the query.
+
+3. **Count each side in its own sub-select.** Two independent patterns in one
+   `WHERE` multiply each other's rows: 67 resources against 144 entities is
+   9 648 intermediate solutions for one paper, and that is the small case.
+   `COUNT(DISTINCT ?x)` still reports the right number, but the query may not
+   finish. When a query reports counts from both graphs, give each its own
+   `{ SELECT ?paper (COUNT(DISTINCT …) AS …) … GROUP BY ?paper }` block and join
+   those, with `COALESCE(?count, 0)` in the projection for the optional ones.
+
+Two portability traps, both found by running these queries rather than reading
+them:
+
+- **A `FILTER` only sees variables bound in its own group.** A `VALUES` in the
+  outer group and the `FILTER` that uses it inside a `GRAPH { … }` block is not
+  the same query: inside the block the variable is unbound, the comparison is an
+  error, and a spec-strict engine drops every row. Keep the `FILTER` in the same
+  group as its `VALUES`, after the `GRAPH` blocks. Lenient stores answer the
+  other form anyway, which is how it survives until someone runs it elsewhere.
+- **Avoid `EXISTS` that contains a `GRAPH` clause.** Express the same test as an
+  `OPTIONAL` join on the shared variable and count what bound
+  (`COUNT(DISTINCT ?coveringScope)`, 0 meaning "no"). It reads as well, it is
+  testable offline, and rdflib — the only engine you can check against without
+  the stack — cannot evaluate the `EXISTS` form at all.
+
 ## Test a query before committing
 
 Rendering needs no server or login. It shows the exact SPARQL that will be sent:
@@ -351,3 +395,33 @@ brainkb_qa_run(query_id="ne_entities_of_type",
 
 Bad input comes back as a `400` error dict (for example
 `missing required parameter: entity_type`). An unknown id comes back as a `404`.
+
+Rendering only proves the template is well formed. To check that a query also
+matches real data — the predicate exists, the join binds, the pattern does not
+explode — run it against a Turtle export offline with `test_qa_queries.py`
+(needs `rdflib`, nothing else):
+
+```bash
+python test_qa_queries.py \
+    --graph https://brainkb.org/graph/test-resource/=resources.ttl \
+    --graph https://brainkb.org/graph/named-entity-test/=named_entities.ttl \
+    --category resource_entity_bridge \
+    --param resource_graph=https://brainkb.org/graph/test-resource/ \
+    --param entity_graph=https://brainkb.org/graph/named-entity-test/
+```
+
+It loads each file into the named graph you give it, then renders and executes
+every query of the category with its own `example` parameters, printing row
+counts and timings:
+
+```
+  ok     rb_scope_entity_overlap                23 rows    7.34s
+  EMPTY  rb_out_of_scope_conflicts               0 rows    0.27s
+  SLOW   rb_paper_bridge_summary            no result in 45s
+```
+
+`EMPTY` is only acceptable when you can name the record the sample lacks —
+otherwise it is a wrong predicate or a broken join. `SLOW` means a cross product:
+rdflib is slower than the production store, but a query that will not finish over
+a 20 000-triple sample will not survive a real ingest either. Exit status is
+non-zero if any query fails to render or raises.

@@ -799,6 +799,10 @@ _ANON_READ_PATHS = (
     re.compile(r"^/api/spaces/[^/]+/tree$"),     # a space and its visible subspaces
     re.compile(r"^/api/spaces/[^/]+/data$"),
     re.compile(r"^/api/search$"),
+    re.compile(r"^/api/synthscholar/reviews$"),           # reviews in public spaces
+    re.compile(r"^/api/synthscholar/reviews/[^/]+$"),
+    re.compile(r"^/api/synthscholar/reviews/[^/]+/(studies|screening|evidence|records|text)$"),
+    re.compile(r"^/api/synthscholar/studies$"),
 )
 
 
@@ -847,7 +851,7 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None, *,
 def _post(path: str, params: Optional[Dict[str, Any]] = None,
           json: Any = None, content: Optional[bytes] = None,
           ctype: Optional[str] = None, files: Any = None,
-          timeout: Optional[httpx.Timeout] = None) -> Any:
+          timeout: Optional[httpx.Timeout] = None, data: Optional[Dict[str, Any]] = None) -> Any:
     if not _path_ok(path):
         return dict(_BAD_PATH)
     if not _rate_ok("write", _RL_WRITE):
@@ -859,7 +863,7 @@ def _post(path: str, params: Optional[Dict[str, Any]] = None,
             headers["Content-Type"] = ctype
         with httpx.Client(timeout=timeout or _TIMEOUT) as c:
             resp = c.post(f"{ctx['url']}{path}", params=params or {}, headers=headers,
-                          json=json, content=content, files=files)
+                          json=json, content=content, files=files, data=data)
         return _result(resp)
     except _NotAuthed as e:
         return {"error": True, "detail": str(e)}
@@ -1253,8 +1257,34 @@ def brainkb_space_tree(slug: str) -> Any:
 @mcp.tool()
 def brainkb_set_space_visibility(slug: str, visibility: str) -> Any:
     """Set a space 'public' (anyone, even anonymous, can read) or 'private'
-    (members only). Owner only."""
+    (members only). Owner only. Everything in a public space is public: making a
+    space public also makes all its subspaces public, and a subspace of a public
+    space cannot be made private (409). Under a private space each subspace can be
+    public or private on its own."""
     return _patch(f"/api/spaces/{_seg(slug)}/visibility", json={"visibility": visibility})
+
+
+@mcp.tool()
+def brainkb_update_space(slug: str, name: Optional[str] = None,
+                         description: Optional[str] = None,
+                         new_slug: Optional[str] = None) -> Any:
+    """Rename a space, change its description, and/or give it a new slug. Owner/manager
+    only. Pass only what changes; description="" clears it.
+
+    `new_slug` (lowercase letters, digits and hyphens, 3-64 chars) moves the space's IRI
+    and every graph whose IRI is built from the old slug (https://brainkb.org/graph/<slug>/…,
+    …/synthscholar/<slug>/…) to the new slug, with their registry, search and history
+    records and SynthScholar reviews; graphs with other IRIs keep theirs. The old slug and
+    IRIs stay as aliases: they keep resolving and nobody else can take them, but ingest
+    into an old IRI is refused with the new one. The result's `rename.moved_graphs` lists
+    each from → to. 409 if the slug or a target graph is taken.
+
+    Before calling with `new_slug`: show the user the graphs that will move and confirm."""
+    body = {k: v for k, v in (("name", name), ("description", description), ("slug", new_slug)) if v is not None}
+    if not body:
+        return {"error": True, "status_code": 400,
+                "detail": "pass a name, a description, a new_slug, or a combination; nothing was changed."}
+    return _patch(f"/api/spaces/{_seg(slug)}", json=body)
 
 
 @mcp.tool()
@@ -1263,15 +1293,17 @@ def brainkb_delete_space(slug: str, confirm_slug: str) -> Any:
 
     Drops the space's named graphs and the ingestion-history (delta) graphs that
     hold copies of their data, removes the graphs' registry entries and the space's
-    RDF manifest, and deletes the space with its members, access rules and search
-    entries. The deletion itself is kept in the provenance graph (who, when, which
-    graphs: prov:invalidated). `confirm_slug` must equal `slug`.
+    RDF manifest, and deletes the space with its members, access rules, search
+    entries and SynthScholar reviews (with their kept files). EVERY SUBSPACE below it,
+    at any depth, is deleted the same way, deepest first (`subspaces_deleted`). Each
+    deletion is kept in the provenance graph (who, when, which graphs:
+    prov:invalidated). `confirm_slug` must equal `slug`.
 
-    Before calling: show the user the space (brainkb_read_space or
-    brainkb_list_spaces) and what will be lost, and get their explicit
-    confirmation in this conversation. Never call it to tidy up on your own
-    initiative. A non-SuperAdmin caller gets 403; if the triplestore step fails
-    (502), nothing was deleted and it is safe to retry."""
+    Before calling: show the user the space AND its subspaces (brainkb_space_tree)
+    and what will be lost, and get their explicit confirmation in this conversation.
+    Never call it to tidy up on your own initiative. A non-SuperAdmin caller gets
+    403; if a step fails (502) the message says which spaces were already deleted —
+    the rest is untouched and it is safe to retry."""
     if (confirm_slug or "").strip() != (slug or "").strip() or not (slug or "").strip():
         return {"error": True, "status_code": 400,
                 "detail": "confirm_slug must equal slug; nothing was deleted."}
@@ -1561,8 +1593,9 @@ def _upload_discard(upload_id: str) -> None:
             pass
 
 
-def _ingest_path(p: str) -> str:
+def _ingest_path(p: str, *, directory: bool = False) -> str:
     """Resolve a file-ingest path, or raise PermissionError if it is not allowed.
+    directory=True expects a directory (a SynthScholar output folder) instead.
 
     realpath() first, so symlinks cannot point out of the configured root.
     """
@@ -1599,7 +1632,10 @@ def _ingest_path(p: str) -> str:
             "calls silently breaks blank nodes. brainkb_ingest_text is for RDF you "
             "authored in-session, and takes sha256= so even that is checked."
         )
-    if not os.path.isfile(rp):
+    if directory:
+        if not os.path.isdir(rp):
+            raise PermissionError(f"{p!r} is not a directory.")
+    elif not os.path.isfile(rp):
         raise PermissionError(f"{p!r} is not a regular file.")
     return rp
 
@@ -1835,6 +1871,197 @@ def brainkb_ingest_files(named_graph_iri: str, file_paths: List[str],
 
 
 # --------------------------------------------------------------------------- #
+# SynthScholar reviews (query_service /api/synthscholar/reviews)
+# --------------------------------------------------------------------------- #
+# A SynthScholar run's output directory is ingested like any other data: into a
+# space, as the caller, under the space's write rules. The review's RDF and an
+# import record go into its own graph; its files are kept and readable by whoever
+# can read the space.
+
+# What the server leaves out (it decides again; skipping here only avoids
+# uploading intermediate work).
+_SS_SKIP_DIRS = {"work", ".git", "__pycache__", "node_modules", ".ipynb_checkpoints", ".venv"}
+_SS_SKIP_NAMES = {".DS_Store", "Thumbs.db"}
+_SS_MAX_FILES = 1000
+
+
+def _ss_route_missing(out: Any) -> Any:
+    """FastAPI's bare 404 ({"detail": "Not Found"}) means the backend has no
+    /api/synthscholar route at all — an MCP deployed ahead of its query_service.
+    Say that, instead of letting it read as "no such review" or "no reviews"."""
+    if isinstance(out, dict) and out.get("error") and out.get("status_code") in (404, 405) \
+            and out.get("detail") in ({"detail": "Not Found"}, {"detail": "Method Not Allowed"}, "Not Found"):
+        return {"error": True, "status_code": out["status_code"],
+                "detail": "This BrainKB backend's query service has no SynthScholar ingest yet "
+                          "(/api/synthscholar/reviews) — it needs updating to the release that adds it."}
+    return out
+
+
+@mcp.tool()
+def brainkb_synthscholar_ingest(output_dir: str, space_slug: str) -> Any:
+    """Ingest a SynthScholar review — the output directory of a run (the folder
+    holding review.json and review.ttl, as the synthscholar skill writes it) — into
+    a space you may write to (see brainkb_list_writable_spaces; you need to be its
+    owner or an editor).
+
+    A review is unique per space: the same run can go into several spaces, once
+    each. Its graph, https://brainkb.org/synthscholar/<space>/reviews/<protocol.review_id>/,
+    is registered in the space; review.ttl plus an import record (PROV-O: who, when,
+    every kept file with media type, size and sha256, what was left out) are ingested
+    as an ordinary job → job_id (poll brainkb_job_status, reconcile with
+    brainkb_delta). Everything but work/ is kept and shown on the review's page.
+    Once per review per space: the same run into the same space again is refused (409). Reads the MCP server's
+    filesystem, so it follows brainkb_ingest_files' rules (MCP_INGEST_ROOT)."""
+    try:
+        root = _ingest_path(output_dir, directory=True)
+    except PermissionError as e:
+        return {"error": True, "status_code": 403, "detail": str(e)}
+    for required in ("review.json", "review.ttl"):
+        if not os.path.isfile(os.path.join(root, required)):
+            hint = " — export the review with --formats ttl" if required == "review.ttl" else ""
+            return {"error": True, "detail": f"{output_dir!r} has no {required}{hint}."}
+    keep, left_out = [], []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+        top = rel_dir.split("/")[0] if rel_dir else ""
+        for name in sorted(filenames):
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            if name in _SS_SKIP_NAMES:
+                continue
+            if any(part in _SS_SKIP_DIRS for part in rel_dir.split("/") if part):
+                left_out.append({"path": rel, "reason": f"intermediate files ({top}/)"})
+                continue
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full) or not os.path.realpath(full).startswith(root + os.sep):
+                continue
+            keep.append((rel, full))
+    if len(keep) > _SS_MAX_FILES:
+        return {"error": True, "detail": f"The review has {len(keep)} files; at most {_SS_MAX_FILES} can be ingested."}
+    handles = []
+    try:
+        files = []
+        for rel, full in keep:
+            fh = open(full, "rb")
+            handles.append(fh)
+            files.append(("files", (rel, fh, "application/octet-stream")))
+        form = {"space_slug": space_slug}
+        if left_out:
+            form["left_out"] = jsonlib.dumps(left_out[:5000])
+        return _ss_route_missing(_post("/api/synthscholar/reviews", files=files, data=form, timeout=_UPLOAD_TIMEOUT))
+    finally:
+        for fh in handles:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+
+@mcp.tool()
+def brainkb_synthscholar_list_reviews(space: str = "", q: str = "") -> Any:
+    """Ingested SynthScholar reviews you can read (public spaces: anyone): id, title,
+    research question, space, graph, included count, when ingested, ingest job.
+    `q` filters on text in the title or research question."""
+    params = {k: v for k, v in (("space", space), ("q", q)) if v}
+    return _ss_route_missing(_get("/api/synthscholar/reviews", params=params or None, anonymous=True))
+
+
+# A review is unique per space: the same review id can be in several spaces. Every
+# per-review tool takes `space`; leave it empty when the review is in one space you
+# can read — with several, the 409 names them.
+def _ss_query(review_id: str, what: str, params: Dict[str, Any]) -> Any:
+    params = {k: v for k, v in params.items() if v not in (None, "", 0) or k == "offset" and v}
+    return _ss_route_missing(_get(f"/api/synthscholar/reviews/{_seg(review_id)}/{what}", params=params, anonymous=True))
+
+
+@mcp.tool()
+def brainkb_synthscholar_studies(review_id: str, q: str = "", full_text: Optional[bool] = None, source: str = "",
+                                 rob: str = "", year_from: int = 0, year_to: int = 0, with_abstract: bool = False,
+                                 limit: int = 50, offset: int = 0, space: str = "") -> Any:
+    """The included studies of an ingested review, filtered. `q`: text in title,
+    authors, journal, DOI, PMID or keywords. `full_text`: true = read in full,
+    false = abstract only. `source`: full-text route (europe_pmc, unpaywall, ezproxy,
+    arxiv, …). `rob`: risk-of-bias rating (low, high, some concerns). Years
+    inclusive. Each study: ids, title, authors, year, journal, how it was read and
+    by which route, RoB. Paged (`total`, at most 200 per call)."""
+    return _ss_query(review_id, "studies", {"space": space, "q": q, "full_text": None if full_text is None else str(full_text).lower(),
+                                           "source": source, "rob": rob, "year_from": year_from, "year_to": year_to,
+                                           "with_abstract": "true" if with_abstract else None, "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_screening(review_id: str, stage: str = "", decision: str = "", assessed_on: str = "",
+                                   reason: str = "", q: str = "", pmid: str = "", limit: int = 50, offset: int = 0, space: str = "") -> Any:
+    """The screening audit trail of an ingested review: every decision with its
+    stage (title_abstract | full_text), decision (include | exclude), what it was
+    judged on (title_abstract | full_text | abstract_only), the full-text route and
+    the reason. Filter by any of those, by text or criterion code in the reason
+    (e.g. "EC2"), or by PMID. Also returns counts for the filtered set: by stage and
+    decision, what decisions were judged on, and exclusion reasons by criterion."""
+    return _ss_query(review_id, "screening", {"space": space, "stage": stage, "decision": decision, "assessed_on": assessed_on,
+                                             "reason": reason, "q": q, "pmid": pmid, "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_evidence(review_id: str, q: str = "", claim: str = "", pmid: str = "",
+                                  grounded: Optional[bool] = None, limit: int = 50, offset: int = 0, space: str = "") -> Any:
+    """Evidence spans of an ingested review: the quoted text its claims rest on, with
+    the study, section, relevance, and whether the quote was matched verbatim in
+    the source (`grounded`). Filter by text, claim type, PMID or grounding."""
+    return _ss_query(review_id, "evidence", {"space": space, "q": q, "claim": claim, "pmid": pmid,
+                                            "grounded": None if grounded is None else str(grounded).lower(),
+                                            "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_records(review_id: str, kind: str, q: str = "", study: str = "", fields: str = "",
+                                 limit: int = 50, offset: int = 0, space: str = "") -> Any:
+    """Per-study records an ingested review produced. `kind`: `charting` (the
+    data-charting form's answers per study), `appraisal` (critical appraisal by
+    domain) or `narrative` (narrative synthesis rows: design, methods, outcomes,
+    limitations). `q`: text in the answers (e.g. "neo4j" finds the studies that
+    report it); `study`: source id (S-001), title, DOI or PMID; `fields`:
+    comma-separated fields to return (the response lists the available ones)."""
+    return _ss_query(review_id, "records", {"space": space, "kind": kind, "q": q, "study": study, "fields": fields,
+                                           "limit": limit, "offset": offset})
+
+
+@mcp.tool()
+def brainkb_synthscholar_text(review_id: str, section: str = "", space: str = "") -> Any:
+    """An ingested review's own text: `abstract`, `introduction`, `synthesis`,
+    `bias`, `limitations`, `conclusions`, `research_question`, `search_queries` or
+    `per_group` (the per-group analysis) — or all of them when `section` is empty."""
+    return _ss_query(review_id, "text", {"space": space, "section": section})
+
+
+@mcp.tool()
+def brainkb_synthscholar_find_study(doi: str = "", pmid: str = "", title: str = "") -> Any:
+    """Which ingested reviews (that you can read) include or screened a study —
+    by DOI, PMID or part of its title (6+ characters) — and what happened to it in
+    each: included (read in full or from the abstract) or each screening decision
+    with its reason."""
+    params = {k: v for k, v in (("doi", doi), ("pmid", pmid), ("title", title)) if v}
+    if not params:
+        return {"error": True, "detail": "Give a doi, pmid or title."}
+    return _ss_route_missing(_get("/api/synthscholar/studies", params=params, anonymous=True))
+
+
+@mcp.tool()
+def brainkb_synthscholar_get_review(review_id: str, space: str = "") -> Any:
+    """One ingested review: summary, its graph and space, the files kept (path,
+    kind, media type, size, sha256), the run's search log and verification, the
+    screening basis and full-text retrieval. Long texts and the per-study list are
+    left out here — read them from the graph or the review page."""
+    out = _ss_route_missing(_get(f"/api/synthscholar/reviews/{_seg(review_id)}",
+                                 params={"space": space} if space else None, anonymous=True))
+    if isinstance(out, dict) and isinstance(out.get("detail"), dict):
+        d = out["detail"]
+        out["detail"] = {k: d.get(k) for k in ("research_question", "search_queries", "flow", "screening", "retrieval")}
+        out["detail"]["included_count"] = len(d.get("included_articles") or [])
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # ingest status
 # --------------------------------------------------------------------------- #
 
@@ -1916,7 +2143,7 @@ def brainkb_sparql(sparql_query: str) -> Any:
 
 # Each module registers its QAQuery objects on import. A new category is a new
 # module plus one entry here.
-QA_MODULES = ("named_entities_qa", "resources_qa")
+QA_MODULES = ("named_entities_qa", "resources_qa", "resource_entity_bridge_qa")
 
 for _mod in QA_MODULES:
     importlib.import_module(_mod)
